@@ -1,225 +1,232 @@
-// salsa.sv: the SALSA system around your front-end (salsa_fenwick_pull.sv).
+// ===========================================================================
+//  SALSA issue front-end, Fenwick instance, Zynq-7020
 //
-//   s_axis -> salsa_datapath (7 cycles, never stalls) -> result FIFO -> m_axis
-//   s_axi  -> registers (start, run length, counters)
+//  Scope: placement and issue only. SALSA turns one request into a
+//  conflict-free per-bank schedule (enable + set address for every bank);
+//  the memory or cache behind it belongs to the integrator. No storage, no
+//  arbitration, no aggregation here.
 //
-// Word format (s_axis and m_axis, 64 bits):
-//   [63:62] op (0 query, 1 store)  [61:48] seq  [47:32] key  [31:0] value / result
+//  Requests
+//    query p   (q_is_write = 0): issue every node of the query chain
+//              p, p-lsb(p), ... , in one cycle.
+//    add x, d  (q_is_write = 1): issue node x alone, with d passed through.
+//
+//  Geometry, W = 15, K = 11, B = 16
+//    lo = x[K-1:0], hi = x[W-1:K].
+//    Banked nodes (lo != 0):   bank = (popcount(lo) + hi) mod B,  set = lo.
+//    Registered nodes (lo = 0, the 15 roots of the 4-bit sub-tree) are not
+//    banked; SALSA flags them on iss_reg_en for the integrator's flops.
+//
+//  Lazy chain generation
+//    Every set bit i of lo stands for exactly one chain node: lo with all
+//    bits below i cleared. So chain_gen never builds node addresses. It
+//    emits one 5-bit tag per bit position, (valid, bank), where
+//        valid_i = lo[i]
+//        bank_i  = (popcount(lo[K-1:i]) + hi) mod B
+//    e.g. lo = 1101, hi = 0  ->  bit3 (1,b1)  bit2 (1,b2)  bit1 (0,b2)  bit0 (1,b3).
+//    The node address is materialised only at the crossbar, as the mask
+//    {lo[K-1:i], i'b0}, which is wiring. The pipeline register between the
+//    two carries 5 bits per lane instead of a full address.
+//    Popcount falls by one per chain step and hi is fixed, so the valid
+//    tags of one request carry distinct banks whenever K <= B.
+//
+//  Pipeline: input reg -> tag reg -> issue reg. Latency 3, one request per
+//  cycle, q_ready tied high. With IN_REG = 0 the input register is removed
+//  (the request must then come from a register, e.g. an AXI-Stream source):
+//  tag reg -> issue reg, latency 2.
+// ===========================================================================
 
-package salsa_pkg;
-  localparam int W = 16, K = 12, B = 16, R = 15;   // key bits, set bits, banks, roots
-  localparam logic [1:0] OP_QUERY = 0, OP_STORE = 1;
-  typedef struct packed {
-    logic [1:0]  op;
-    logic [13:0] seq;
-    logic [15:0] key;
-    logic [31:0] value;
-  } word_t;
-endpackage
-
-// ---------------------------------------------------------------------------
-// Datapath: front-end + 16 banks + 15 roots + adder.
-//   store: SALSA places the value; result = value (echo)
-//   query: result = sum of every node on the key's chain
-// Stores write and queries read at the same (issue) stage, in order, so a
-// query always sees earlier stores.
-// ---------------------------------------------------------------------------
-module salsa_datapath import salsa_pkg::*; (
-  input  logic               clk, rst,
-  input  logic               in_valid,
-  input  word_t              in_word,
-  output logic               out_valid,
-  output word_t              out_word,
-  output logic [B-1:0][31:0] bank_stores,
-  output logic [31:0]        root_stores
-);
-  // ---- front-end
-  logic iss_valid, iss_write, ready;
-  logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
-
-  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32)) u_fe (
-    .clk, .rst_n(!rst),
-    .q_valid(in_valid), .q_is_write(in_word.op == OP_STORE),
-    .q_idx(in_word.key), .q_data(in_word.value), .q_ready(ready),
-    .iss_valid, .iss_write, .iss_bank_en(en), .iss_bank_set(set),
-    .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
-
-  // the request word, delayed to line up with the front-end's 3 cycles
-  word_t w0, w1, w2;
-  always_ff @(posedge clk) begin w0 <= in_word; w1 <= w0; w2 <= w1; end
-
-  logic store, query;
-  assign store = iss_valid &&  iss_write;
-  assign query = iss_valid && !iss_write;
-
-  // ---- 16 banks, 4096 x 32 bits each (block RAM, 2-cycle read)
-  logic [B-1:0][31:0] rd;
-  for (genvar b = 0; b < B; b++) begin : g_bank
-    (* ram_style = "block" *) logic [31:0] mem [4096];
-    logic [31:0] q;
-    initial for (int i = 0; i < 4096; i++) mem[i] = 0;
-    always_ff @(posedge clk) begin
-      if (store && en[b]) mem[set[b*K +: K]] <= data;
-      if (query && en[b]) q <= mem[set[b*K +: K]];
-      rd[b] <= q;
-      if (rst) bank_stores[b] <= 0; else if (store && en[b]) bank_stores[b] <= bank_stores[b] + 1;
-    end
-  end
-
-  // ---- 15 roots; lane j of iss_reg_en means the root "hi with bits below j cleared"
-  logic [R-1:0] rflag; logic [R-1:0][31:0] root; logic [31:0] root_sum;
-  always_comb begin
-    rflag = 0;
-    for (int j = 0; j < 4; j++) if (lane[j]) rflag[(hi & ~4'((1 << j) - 1)) - 1] = 1;
-    root_sum = 0;
-    for (int h = 0; h < R; h++) if (rflag[h]) root_sum += root[h];
-  end
-  always_ff @(posedge clk)
-    if (rst) begin root <= 0; root_stores <= 0; end
-    else if (store && rflag != 0) begin
-      for (int h = 0; h < R; h++) if (rflag[h]) root[h] <= data;
-      root_stores <= root_stores + 1;
-    end
-
-  // ---- wait 2 cycles for the banks, then add in 2 stages
-  logic v1, v2, v3; word_t x1, x2, x3; logic [B-1:0] en1, en2;
-  logic [31:0] rs1, rs2, rs3; logic [3:0][31:0] part, part_c;
-
-  always_comb
-    for (int g = 0; g < 4; g++) begin
-      part_c[g] = 0;
-      for (int k = 0; k < 4; k++) if (en2[4*g+k]) part_c[g] += rd[4*g+k];
-    end
-
-  always_ff @(posedge clk) begin
-    v1 <= !rst && iss_valid; v2 <= !rst && v1; v3 <= !rst && v2; out_valid <= !rst && v3;
-    x1 <= w2; en1 <= query ? en : 0; rs1 <= query ? root_sum : 0;
-    x2 <= x1; en2 <= en1;            rs2 <= rs1;
-    x3 <= x2; part <= part_c;        rs3 <= rs2;
-    out_word <= x3;
-    if (x3.op == OP_QUERY) out_word.value <= part[0] + part[1] + part[2] + part[3] + rs3;
-  end
-endmodule
+`default_nettype none
 
 // ---------------------------------------------------------------------------
-// Top level: AXI-Stream in/out + AXI-Lite registers. Put this in the block design.
-// Registers: 0x00 CTRL (write 1 = start)   0x04 STATUS (bit0 done)   0x08 RUN_LEN
-//            0x0C CYCLES  0x10 REQ_COUNT  0x14 RES_COUNT  0x18 LATENCY
-//            0x40..0x7C BANK_STORES[0..15]  0x80 ROOT_STORES
+//  Parallel prefix popcount (Sklansky). pcb[i] = popcount(v[i-1:0]),
+//  pcb[0] = 0, pcb[N] = popcount(v). ceil(log2 N) adder levels.
 // ---------------------------------------------------------------------------
-module salsa import salsa_pkg::*; #(
-  parameter int DEPTH = 32                     // result FIFO; must exceed the datapath latency
+module prefix_popcount #(
+    parameter int unsigned N  = 11,
+    parameter int unsigned CW = $clog2(N + 1)
 ) (
-  input  wire        aclk, aresetn,
-  input  wire [63:0] s_axis_tdata,  input  wire s_axis_tvalid, output wire s_axis_tready,
-  input  wire        s_axis_tlast,
-  output reg  [63:0] m_axis_tdata,  output reg  m_axis_tvalid, input  wire m_axis_tready,
-  output reg         m_axis_tlast,
-  input  wire [7:0]  s_axi_awaddr,  input  wire [2:0] s_axi_awprot,
-  input  wire        s_axi_awvalid, output wire s_axi_awready,
-  input  wire [31:0] s_axi_wdata,   input  wire [3:0] s_axi_wstrb,
-  input  wire        s_axi_wvalid,  output wire s_axi_wready,
-  output wire [1:0]  s_axi_bresp,   output reg  s_axi_bvalid,  input wire s_axi_bready,
-  input  wire [7:0]  s_axi_araddr,  input  wire [2:0] s_axi_arprot,
-  input  wire        s_axi_arvalid, output wire s_axi_arready,
-  output reg  [31:0] s_axi_rdata,   output wire [1:0] s_axi_rresp,
-  output reg         s_axi_rvalid,  input  wire s_axi_rready
+    input  wire  logic [N-1:0]      v,
+    output logic [(N+1)*CW-1:0]     pcb          // CW bits per entry
 );
-  logic rst;
-  assign rst = !aresetn;
+    localparam int unsigned LV = (N > 1) ? $clog2(N) : 1;
+    logic [CW-1:0] s [0:LV][0:N-1];
 
-  // ---- input handshake; credits: accept only if every result in flight has a FIFO slot
-  logic accept, out_valid;
-  word_t out_word;
-  logic [7:0] in_flight, count;
-  assign accept        = s_axis_tvalid && s_axis_tready;
-  assign s_axis_tready = aresetn && (count + in_flight < DEPTH);
-
-  always_ff @(posedge aclk)
-    if (rst) in_flight <= 0; else in_flight <= in_flight + accept - out_valid;
-
-  logic [B-1:0][31:0] bank_stores; logic [31:0] root_stores;
-  salsa_datapath u_dp (.clk(aclk), .rst,
-    .in_valid(accept), .in_word(word_t'(s_axis_tdata)),
-    .out_valid, .out_word, .bank_stores, .root_stores);
-
-  // ---- result FIFO with a registered output and fall-through; tlast rides along as bit 64
-  //  A finished result goes straight to the output register when the FIFO is empty and
-  //  the output is free (bypass), saving the FIFO write cycle. Otherwise it is queued
-  //  (push) and leaves in order (load). Bypass needs an empty FIFO, so order is kept.
-  logic start; logic [31:0] run_len, pushed;
-  logic [64:0] fifo [DEPTH];
-  logic [$clog2(DEPTH)-1:0] wp, rp;
-  logic free, load, bypass, push, last;
-  assign free   = !m_axis_tvalid || m_axis_tready;        // output register can take a word
-  assign load   = free && count != 0;                      // oldest queued result to the output
-  assign bypass = free && count == 0 && out_valid;         // new result straight to the output
-  assign push   = out_valid && !bypass;                    // new result into the FIFO
-  assign last   = pushed == run_len - 1;                   // this result ends the run
-
-  always_ff @(posedge aclk) begin
-    if (push) fifo[wp] <= {last, out_word};
-    if (rst) begin
-      wp <= 0; rp <= 0; count <= 0; m_axis_tvalid <= 0;
-    end else begin
-      if (push) wp <= wp + 1;
-      if (load) rp <= rp + 1;
-      count <= count + push - load;
-      if (free) m_axis_tvalid <= load || bypass;
+    always_comb begin
+        for (int unsigned i = 0; i < N; i++) s[0][i] = CW'(v[i]);
+        for (int unsigned l = 0; l < LV; l++)
+            for (int unsigned i = 0; i < N; i++)
+                if ((i >> l) & 1)
+                    s[l+1][i] = s[l][i] + s[l][((i >> l) << l) - 1];
+                else
+                    s[l+1][i] = s[l][i];
+        pcb[CW-1:0] = '0;
+        for (int unsigned i = 0; i < N; i++)
+            pcb[(i+1)*CW +: CW] = s[LV][i];
     end
-    if (load)        {m_axis_tlast, m_axis_tdata} <= fifo[rp];
-    else if (bypass) {m_axis_tlast, m_axis_tdata} <= {last, out_word};
-    if (rst || start) pushed <= 0; else if (out_valid) pushed <= pushed + 1;
-  end
-
-  // ---- counters
-  logic send, timing, done, got_first;
-  logic [31:0] cycles, req_count, res_count, latency;
-  assign send = m_axis_tvalid && m_axis_tready;
-
-  always_ff @(posedge aclk)
-    if (rst || start) begin
-      timing <= 0; done <= 0; got_first <= 0;
-      cycles <= 0; req_count <= 0; res_count <= 0; latency <= 0;
-    end else begin
-      if (accept && !timing && !done) timing <= 1;
-      if (timing || (accept && !done)) cycles <= cycles + 1;
-      if (timing && !got_first) latency <= latency + 1;
-      if (send) got_first <= 1;
-      if (send && m_axis_tlast) begin timing <= 0; done <= 1; end
-      req_count <= req_count + accept;
-      res_count <= res_count + send;
-    end
-
-  // ---- AXI-Lite: a write needs address and data together, and a free B channel
-  logic wr;
-  assign s_axi_awready = wr;
-  assign s_axi_wready  = wr;
-  assign s_axi_arready = !s_axi_rvalid;
-  assign s_axi_bresp = 0;
-  assign s_axi_rresp = 0;
-
-  always_ff @(posedge aclk) begin
-    wr    <= !rst && !wr && s_axi_awvalid && s_axi_wvalid && (!s_axi_bvalid || s_axi_bready);
-    start <= wr && s_axi_awaddr[7:2] == 0 && s_axi_wdata[0];
-    if (rst) run_len <= 0; else if (wr && s_axi_awaddr[7:2] == 2) run_len <= s_axi_wdata;
-
-    if (rst) s_axi_bvalid <= 0; else if (wr) s_axi_bvalid <= 1; else if (s_axi_bready) s_axi_bvalid <= 0;
-    if (rst) s_axi_rvalid <= 0; else if (s_axi_arvalid && s_axi_arready) s_axi_rvalid <= 1;
-    else if (s_axi_rready) s_axi_rvalid <= 0;
-
-    if (!s_axi_rvalid || s_axi_rready)
-      case (s_axi_araddr[7:2])
-        1:  s_axi_rdata <= {31'd0, done};
-        2:  s_axi_rdata <= run_len;
-        3:  s_axi_rdata <= cycles;
-        4:  s_axi_rdata <= req_count;
-        5:  s_axi_rdata <= res_count;
-        6:  s_axi_rdata <= latency;
-        32: s_axi_rdata <= root_stores;
-        default: s_axi_rdata <= (s_axi_araddr[7:6] == 1) ? bank_stores[s_axi_araddr[5:2]] : 0;
-      endcase
-  end
-
-  wire unused = ^{s_axis_tlast, s_axi_awprot, s_axi_arprot, s_axi_wstrb};
 endmodule
+
+// ---------------------------------------------------------------------------
+//  Lazy chain generation: one (valid, bank) tag per bit position of lo,
+//  plus one valid bit per bit position of hi for the registered region.
+// ---------------------------------------------------------------------------
+module chain_gen #(
+    parameter int unsigned K  = 11,
+    parameter int unsigned HW = 4,
+    parameter int unsigned BW = 4,
+    parameter int unsigned CW = $clog2(K + 1)
+) (
+    input  wire  logic [K-1:0]      lo,
+    input  wire  logic [HW-1:0]     hi,
+    input  wire  logic              is_query,
+    output logic [K-1:0]            tag_v,       // lane i <-> bit i of lo
+    output logic [K*BW-1:0]         tag_b,       // BW bits per lane
+    output logic [K*CW-1:0]         tag_s,       // sigma_i per lane (pull form)
+    output logic [HW-1:0]           reg_v        // lane j <-> bit j of hi
+);
+    // suffix popcount: run the prefix network on lo bit-reversed,
+    // so popcount(lo[K-1:i]) = pcb_r[K-i]
+    logic [K-1:0]          lo_r;
+    logic [(K+1)*CW-1:0]   pcb_r;
+    always_comb for (int unsigned i = 0; i < K; i++) lo_r[i] = lo[K-1-i];
+    prefix_popcount #(.N(K), .CW(CW)) u_pc (.v(lo_r), .pcb(pcb_r));
+
+    // an add issues only the node itself, i.e. the lane of lo's lowest set bit
+    wire [K-1:0]  lo_low = lo & (~lo + 1'b1);
+    wire [HW-1:0] hi_low = hi & (~hi + 1'b1);
+
+    always_comb begin
+        for (int unsigned i = 0; i < K; i++) begin
+            tag_v[i]           = is_query ? lo[i] : lo_low[i];
+            tag_b[i*BW +: BW]  = BW'(pcb_r[(K-i)*CW +: CW]) + BW'(hi);
+            tag_s[i*CW +: CW]  = pcb_r[(K-i)*CW +: CW];
+        end
+        // registered region: a query touches every hi-chain root; an add
+        // touches one only when the node itself has lo = 0
+        reg_v = is_query ? hi : ((lo == '0) ? hi_low : '0);
+    end
+endmodule
+
+// ===========================================================================
+//  SALSA top, pull form (no crossbar)
+// ===========================================================================
+module salsa_fen_pull_top #(
+    parameter int unsigned W  = 15,
+    parameter int unsigned K  = 11,
+    parameter int unsigned B  = 16,
+    parameter int unsigned DW = 32,
+    parameter bit          IN_REG = 1'b1      // 1: register the request first (latency 3); 0: latency 2
+) (
+    input  wire  logic             clk,
+    input  wire  logic             rst_n,
+    // request
+    input  wire  logic             q_valid,
+    input  wire  logic             q_is_write,
+    input  wire  logic [W-1:0]     q_idx,
+    input  wire  logic [DW-1:0]    q_data,
+    output logic                   q_ready,
+    // issue schedule, one request per cycle
+    output logic                   iss_valid,
+    output logic                   iss_write,
+    output logic [B-1:0]           iss_bank_en,
+    output logic [B*K-1:0]         iss_bank_set,   // K bits per bank
+    output logic [W-K-1:0]         iss_reg_en,     // lane j: root {hi with bits below j cleared}
+    output logic [W-K-1:0]         iss_hi,
+    output logic [DW-1:0]          iss_data
+);
+    localparam int unsigned BW = $clog2(B);
+    localparam int unsigned HW = W - K;
+
+`ifndef SYNTHESIS
+    initial begin
+        if ((1 << BW) != B) $fatal(1, "B must be a power of two");
+        if (K > B)          $fatal(1, "a chain has up to K banked nodes; need K <= B");
+        if (HW != BW)       $fatal(1, "need W - K == log2(B) for an injective, balanced map");
+    end
+`endif
+
+    assign q_ready = 1'b1;
+
+    // ---- stage 1: input register (optional) ------------------------------
+    logic          iv, iw;
+    logic [W-1:0]  ix;
+    logic [DW-1:0] id;
+    if (IN_REG) begin : g_in_reg
+        always_ff @(posedge clk) begin
+            if (!rst_n) iv <= 1'b0; else iv <= q_valid;
+            iw <= q_is_write; ix <= q_idx; id <= q_data;
+        end
+    end else begin : g_in_wire
+        assign iv = q_valid && rst_n;
+        assign iw = q_is_write;
+        assign ix = q_idx;
+        assign id = q_data;
+    end
+
+    // ---- lazy tags: (valid, sigma) per lane; the offset is applied at the bank
+    localparam int unsigned CW = $clog2(K + 1);
+    logic [K-1:0]    c_tv;
+    logic [K*CW-1:0] c_ts;
+    logic [HW-1:0]   c_rv;
+    chain_gen #(.K(K), .HW(HW), .BW(BW)) u_chain (
+        .lo(ix[K-1:0]), .hi(ix[W-1:K]), .is_query(!iw),
+        .tag_v(c_tv), .tag_b(), .tag_s(c_ts), .reg_v(c_rv));
+    wire [CW-1:0] c_pc = c_ts[0 +: CW];          // sigma_0 = popcount(lo)
+    wire [BW-1:0] c_c  = BW'(ix[W-1:K]);         // c = g(hi), identity
+
+    // ---- stage 2: tag register (5 bits per lane, plus lo for the masks) ----
+    logic            tv, tw;
+    logic [K-1:0]    t_tv, t_lo;
+    logic [K*CW-1:0] t_ts;
+    logic [CW-1:0]   t_pc;
+    logic [BW-1:0]   t_c;
+    logic [HW-1:0]   t_rv, t_hi;
+    logic [DW-1:0]   t_d;
+    always_ff @(posedge clk) begin
+        if (!rst_n) tv <= 1'b0; else tv <= iv;
+        t_tv <= iv ? c_tv : '0;
+        t_rv <= iv ? c_rv : '0;
+        t_ts <= c_ts;
+        t_pc <= c_pc;
+        t_c  <= c_c;
+        t_lo <= ix[K-1:0];
+        t_hi <= ix[W-1:K];
+        tw   <= iw;
+        t_d  <= id;
+    end
+
+    // ---- stage 2, pull form: no crossbar ---------------------------------------
+    //  bank b owns rank r_b = b - c; it keeps bit j of lo iff sigma_j <= r_b.
+    //  A query uses every rank 1..popcount(lo); an add only its own node,
+    //  whose rank is popcount(lo).
+    logic [B-1:0]   x_en;
+    logic [B*K-1:0] x_set;
+    always_comb
+        for (int unsigned b = 0; b < B; b++) begin
+            logic [BW-1:0] r;
+            r = BW'(b) - t_c;
+            x_en[b] = tv && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
+            for (int unsigned j = 0; j < K; j++)
+                x_set[b*K + j] = t_lo[j] && (t_ts[j*CW +: CW] <= CW'(r));
+            if (!x_en[b]) x_set[b*K +: K] = '0;
+        end
+
+    // ---- stage 3: issue register --------------------------------------------
+    always_ff @(posedge clk) begin
+        if (!rst_n) begin
+            iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0;
+        end else begin
+            iss_valid   <= tv;
+            iss_bank_en <= x_en;
+            iss_reg_en  <= t_rv;
+        end
+        iss_write    <= tw;
+        iss_bank_set <= x_set;
+        iss_hi       <= t_hi;
+        iss_data     <= t_d;
+    end
+
+    // no conflict assertion: each bank selects exactly one rank by construction
+endmodule
+
+`default_nettype wire
