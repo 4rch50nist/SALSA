@@ -92,12 +92,17 @@ module salsa_datapath import salsa_pkg::*; (
     end
 
   always_ff @(posedge clk) begin
-    v1 <= !rst && iss_valid; v2 <= !rst && v1; v3 <= !rst && v2; out_valid <= !rst && v3;
+    v1 <= !rst && iss_valid; v2 <= !rst && v1; v3 <= !rst && v2;
     x1 <= w1; en1 <= query ? en : 0; rs1 <= query ? root_sum : 0;
     x2 <= x1; en2 <= en1;            rs2 <= rs1;
     x3 <= x2; part <= part_c;        rs3 <= rs2;
-    out_word <= x3;
-    if (x3.op == OP_QUERY) out_word.value <= part[0] + part[1] + part[2] + part[3] + rs3;
+  end
+
+  // final add, unregistered: the result goes straight to the FIFO or the output register
+  always_comb begin
+    out_valid = v3;
+    out_word  = x3;
+    if (x3.op == OP_QUERY) out_word.value = part[0] + part[1] + part[2] + part[3] + rs3;
   end
 endmodule
 
