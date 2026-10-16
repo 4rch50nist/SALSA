@@ -143,24 +143,32 @@ module salsa import salsa_pkg::*; #(
     .in_valid(accept), .in_word(word_t'(s_axis_tdata)),
     .out_valid, .out_word, .bank_stores, .root_stores);
 
-  // ---- result FIFO with a registered output; tlast rides along as bit 64
+  // ---- result FIFO with a registered output and fall-through; tlast rides along as bit 64
+  //  A finished result goes straight to the output register when the FIFO is empty and
+  //  the output is free (bypass), saving the FIFO write cycle. Otherwise it is queued
+  //  (push) and leaves in order (load). Bypass needs an empty FIFO, so order is kept.
   logic start; logic [31:0] run_len, pushed;
   logic [64:0] fifo [DEPTH];
   logic [$clog2(DEPTH)-1:0] wp, rp;
-  logic load;
-  assign load = (!m_axis_tvalid || m_axis_tready) && count != 0;   // output free and FIFO not empty
+  logic free, load, bypass, push, last;
+  assign free   = !m_axis_tvalid || m_axis_tready;        // output register can take a word
+  assign load   = free && count != 0;                      // oldest queued result to the output
+  assign bypass = free && count == 0 && out_valid;         // new result straight to the output
+  assign push   = out_valid && !bypass;                    // new result into the FIFO
+  assign last   = pushed == run_len - 1;                   // this result ends the run
 
   always_ff @(posedge aclk) begin
-    if (out_valid) fifo[wp] <= {pushed == run_len - 1, out_word};
+    if (push) fifo[wp] <= {last, out_word};
     if (rst) begin
       wp <= 0; rp <= 0; count <= 0; m_axis_tvalid <= 0;
     end else begin
-      if (out_valid) wp <= wp + 1;
-      if (load)      rp <= rp + 1;
-      count <= count + out_valid - load;
-      if (!m_axis_tvalid || m_axis_tready) m_axis_tvalid <= (count != 0);
+      if (push) wp <= wp + 1;
+      if (load) rp <= rp + 1;
+      count <= count + push - load;
+      if (free) m_axis_tvalid <= load || bypass;
     end
-    if (load) {m_axis_tlast, m_axis_tdata} <= fifo[rp];
+    if (load)        {m_axis_tlast, m_axis_tdata} <= fifo[rp];
+    else if (bypass) {m_axis_tlast, m_axis_tdata} <= {last, out_word};
     if (rst || start) pushed <= 0; else if (out_valid) pushed <= pushed + 1;
   end
 
