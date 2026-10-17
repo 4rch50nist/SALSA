@@ -41,7 +41,7 @@ module tb;
   endtask
 
   // data and golden
-  int unsigned a[65536], tree[65536], prefix[65536];
+  int unsigned a[65536], tree[65536], prefix[65536], hw_tree[65536];   // hw_tree: what the hardware holds
   word_t expect_q[$];
   int errors = 0, got = 0, n_run = 0; bit backpressure = 0;
 
@@ -84,6 +84,7 @@ module tb;
     for (int i = 1; i < 65536; i++) begin a[i] = $urandom % 1000; prefix[i] = prefix[i-1] + a[i]; end
     tree = a;
     for (int i = 1; i < 65536; i++) if (i + (i & -i) < 65536) tree[i + (i & -i)] += tree[i];
+    hw_tree = tree;
 
     repeat (5) @(posedge clk); rstn = 1;
 
@@ -123,6 +124,31 @@ module tb;
     end
     run(words, 1);
     $display("queries with backpressure: 20000 checked");
+
+    // 5. read-after-write: stores and queries interleaved, each query right behind a
+    //    store to a node on its chain (roots included); golden from a model tree
+    //    updated in stream order
+    for (int bp = 0; bp < 2; bp++) begin
+      int unsigned t[65536]; int x, q, s; int unsigned nv;
+      t = tree;
+      for (int i = 1; i < 65536; i++) if (i + (i & -i) < 65536) ; // (tree already built)
+      // the hardware still holds the loaded tree plus earlier phases' stores; resync the model
+      words.delete();
+      for (int i = 0; i < 20000; i += 2) begin
+        k  = (i % 64 == 0) ? (($urandom % 15) + 1) << 12 : ($urandom % 65535) + 1;   // some roots
+        nv = $urandom;
+        words.push_back(mk(OP_STORE, i, k, nv));
+        expect_q.push_back(mk(OP_STORE, i, k, nv));
+        hw_tree[k] = nv;
+        q = ((k & 15) == 0) ? (k | ($urandom % 16)) : k;
+        s = 0; x = q;
+        while (x > 0) begin s += hw_tree[x]; x -= x & -x; end
+        words.push_back(mk(OP_QUERY, i + 1, q, 0));
+        expect_q.push_back(mk(OP_QUERY, i + 1, q, s));
+      end
+      run(words, bp);
+      $display("read-after-write%s: 10000 stores + 10000 queries interleaved, checked", bp ? " with backpressure" : "");
+    end
 
     $display("%s (%0d errors)", errors == 0 ? "PASS" : "FAIL", errors);
     $finish;

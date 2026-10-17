@@ -37,16 +37,16 @@ module salsa_datapath import salsa_pkg::*; (
   logic iss_valid, iss_write, ready;
   logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
 
-  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0)) u_fe (
+  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0), .ISS_REG(1'b0)) u_fe (
     .clk, .rst_n(!rst),
     .q_valid(in_valid), .q_is_write(in_word.op == OP_STORE),
     .q_idx(in_word.key), .q_data(in_word.value), .q_ready(ready),
     .iss_valid, .iss_write, .iss_bank_en(en), .iss_bank_set(set),
     .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
 
-  // the request word, delayed to line up with the front-end's 2 cycles (no input register)
-  word_t w0, w1;
-  always_ff @(posedge clk) begin w0 <= in_word; w1 <= w0; end
+  // the request word, delayed to line up with the front-end's 1 cycle (tag register only)
+  word_t w0;
+  always_ff @(posedge clk) w0 <= in_word;
 
   logic store, query;
   assign store = iss_valid &&  iss_write;
@@ -94,7 +94,7 @@ module salsa_datapath import salsa_pkg::*; (
 
   always_ff @(posedge clk) begin
     v1 <= !rst && iss_valid; v2 <= !rst && v1;
-    x1 <= w1; en1 <= query ? en : 0; rs1 <= query ? root_sum : 0;
+    x1 <= w0; en1 <= query ? en : 0; rs1 <= query ? root_sum : 0;
     x2 <= x1; part <= part_c;        rs2 <= rs1;
   end
 

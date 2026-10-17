@@ -33,7 +33,9 @@
 //  Pipeline: input reg -> tag reg -> issue reg. Latency 3, one request per
 //  cycle, q_ready tied high. With IN_REG = 0 the input register is removed
 //  (the request must then come from a register, e.g. an AXI-Stream source):
-//  tag reg -> issue reg, latency 2.
+//  tag reg -> issue reg, latency 2. With ISS_REG = 0 the issue register is
+//  removed too: the iss_* outputs come straight from the pull logic, for banks
+//  that register their own address (block RAM), latency 1 with IN_REG = 0.
 // ===========================================================================
 
 `default_nettype none
@@ -115,7 +117,8 @@ module salsa_fen_pull_top #(
     parameter int unsigned K  = 11,
     parameter int unsigned B  = 16,
     parameter int unsigned DW = 32,
-    parameter bit          IN_REG = 1'b1      // 1: register the request first (latency 3); 0: latency 2
+    parameter bit          IN_REG  = 1'b1,    // 1: register the request first; 0: no input register
+    parameter bit          ISS_REG = 1'b1     // 1: register the issue outputs; 0: drive them directly
 ) (
     input  wire  logic             clk,
     input  wire  logic             rst_n,
@@ -211,19 +214,29 @@ module salsa_fen_pull_top #(
             if (!x_en[b]) x_set[b*K +: K] = '0;
         end
 
-    // ---- stage 3: issue register --------------------------------------------
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0;
-        end else begin
-            iss_valid   <= tv;
-            iss_bank_en <= x_en;
-            iss_reg_en  <= t_rv;
+    // ---- stage 3: issue register (optional) -------------------------------
+    if (ISS_REG) begin : g_iss_reg
+        always_ff @(posedge clk) begin
+            if (!rst_n) begin
+                iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0;
+            end else begin
+                iss_valid   <= tv;
+                iss_bank_en <= x_en;
+                iss_reg_en  <= t_rv;
+            end
+            iss_write    <= tw;
+            iss_bank_set <= x_set;
+            iss_hi       <= t_hi;
+            iss_data     <= t_d;
         end
-        iss_write    <= tw;
-        iss_bank_set <= x_set;
-        iss_hi       <= t_hi;
-        iss_data     <= t_d;
+    end else begin : g_iss_wire
+        assign iss_valid    = tv;
+        assign iss_bank_en  = x_en;          // already gated by tv
+        assign iss_reg_en   = tv ? t_rv : '0;
+        assign iss_write    = tw;
+        assign iss_bank_set = x_set;
+        assign iss_hi       = t_hi;
+        assign iss_data     = t_d;
     end
 
     // no conflict assertion: each bank selects exactly one rank by construction
