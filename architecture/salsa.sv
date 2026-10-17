@@ -52,7 +52,7 @@ module salsa_datapath import salsa_pkg::*; (
   assign store = iss_valid &&  iss_write;
   assign query = iss_valid && !iss_write;
 
-  // ---- 16 banks, 4096 x 32 bits each (block RAM, 2-cycle read)
+  // ---- 16 banks, 4096 x 32 bits each (block RAM, 1-cycle read: no output register)
   logic [B-1:0][31:0] rd;
   for (genvar b = 0; b < B; b++) begin : g_bank
     (* ram_style = "block" *) logic [31:0] mem [4096];
@@ -61,9 +61,9 @@ module salsa_datapath import salsa_pkg::*; (
     always_ff @(posedge clk) begin
       if (store && en[b]) mem[set[b*K +: K]] <= data;
       if (query && en[b]) q <= mem[set[b*K +: K]];
-      rd[b] <= q;
       if (rst) bank_stores[b] <= 0; else if (store && en[b]) bank_stores[b] <= bank_stores[b] + 1;
     end
+    assign rd[b] = q;            // read data goes straight to the partial sums
   end
 
   // ---- 15 roots; lane j of iss_reg_en means the root "hi with bits below j cleared"
@@ -81,28 +81,28 @@ module salsa_datapath import salsa_pkg::*; (
       root_stores <= root_stores + 1;
     end
 
-  // ---- wait 2 cycles for the banks, then add in 2 stages
-  logic v1, v2, v3; word_t x1, x2, x3; logic [B-1:0] en1, en2;
-  logic [31:0] rs1, rs2, rs3; logic [3:0][31:0] part, part_c;
+  // ---- 1 cycle for the banks, then add: partial sums registered, final add
+  //      combinational into the result FIFO / output register
+  logic v1, v2; word_t x1, x2; logic [B-1:0] en1;
+  logic [31:0] rs1, rs2; logic [3:0][31:0] part, part_c;
 
   always_comb
     for (int g = 0; g < 4; g++) begin
       part_c[g] = 0;
-      for (int k = 0; k < 4; k++) if (en2[4*g+k]) part_c[g] += rd[4*g+k];
+      for (int k = 0; k < 4; k++) if (en1[4*g+k]) part_c[g] += rd[4*g+k];
     end
 
   always_ff @(posedge clk) begin
-    v1 <= !rst && iss_valid; v2 <= !rst && v1; v3 <= !rst && v2;
+    v1 <= !rst && iss_valid; v2 <= !rst && v1;
     x1 <= w1; en1 <= query ? en : 0; rs1 <= query ? root_sum : 0;
-    x2 <= x1; en2 <= en1;            rs2 <= rs1;
-    x3 <= x2; part <= part_c;        rs3 <= rs2;
+    x2 <= x1; part <= part_c;        rs2 <= rs1;
   end
 
   // final add, unregistered: the result goes straight to the FIFO or the output register
   always_comb begin
-    out_valid = v3;
-    out_word  = x3;
-    if (x3.op == OP_QUERY) out_word.value = part[0] + part[1] + part[2] + part[3] + rs3;
+    out_valid = v2;
+    out_word  = x2;
+    if (x2.op == OP_QUERY) out_word.value = part[0] + part[1] + part[2] + part[3] + rs2;
   end
 endmodule
 
