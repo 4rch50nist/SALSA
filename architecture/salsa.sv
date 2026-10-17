@@ -67,12 +67,17 @@ module salsa_datapath import salsa_pkg::*; (
   end
 
   // ---- 15 roots; lane j of iss_reg_en means the root "hi with bits below j cleared"
-  logic [R-1:0] rflag; logic [R-1:0][31:0] root; logic [31:0] root_sum;
+  //   a query needs at most one root per lane (4 lanes); select them here and add
+  //   them a cycle later (rsel1 -> rs2), so no wide adder sits in the issue cycle
+  logic [R-1:0] rflag; logic [R-1:0][31:0] root; logic [3:0][31:0] rsel;
   always_comb begin
     rflag = 0;
     for (int j = 0; j < 4; j++) if (lane[j]) rflag[(hi & ~4'((1 << j) - 1)) - 1] = 1;
-    root_sum = 0;
-    for (int h = 0; h < R; h++) if (rflag[h]) root_sum += root[h];
+    for (int j = 0; j < 4; j++) begin
+      logic [3:0] idx;
+      idx = (hi & ~4'((1 << j) - 1)) - 1;            // root on lane j (valid when lane[j])
+      rsel[j] = (lane[j] && idx < R) ? root[idx] : 32'd0;
+    end
   end
   always_ff @(posedge clk)
     if (rst) begin root <= 0; root_stores <= 0; end
@@ -84,7 +89,7 @@ module salsa_datapath import salsa_pkg::*; (
   // ---- 1 cycle for the banks, then add: partial sums registered, final add
   //      combinational into the result FIFO / output register
   logic v1, v2; word_t x1, x2; logic [B-1:0] en1;
-  logic [31:0] rs1, rs2; logic [3:0][31:0] part, part_c;
+  logic [3:0][31:0] rsel1; logic [31:0] rs2; logic [3:0][31:0] part, part_c;
 
   always_comb
     for (int g = 0; g < 4; g++) begin
@@ -94,8 +99,8 @@ module salsa_datapath import salsa_pkg::*; (
 
   always_ff @(posedge clk) begin
     v1 <= !rst && iss_valid; v2 <= !rst && v1;
-    x1 <= w0; en1 <= query ? en : 0; rs1 <= query ? root_sum : 0;
-    x2 <= x1; part <= part_c;        rs2 <= rs1;
+    x1 <= w0; en1 <= query ? en : 0; rsel1 <= query ? rsel : '0;
+    x2 <= x1; part <= part_c;        rs2 <= rsel1[0] + rsel1[1] + rsel1[2] + rsel1[3];
   end
 
   // final add, unregistered: the result goes straight to the FIFO or the output register
