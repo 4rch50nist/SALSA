@@ -144,6 +144,8 @@ module salsa_fen_pull_top #(
     output logic                   iss_write,
     output logic                   iss_update,
     output logic [(1 << (W-K))-2:0] iss_root_upd,  // update: root r (index r-1) must add the delta
+    output logic [B-1:0]           iss_own_en,     // update: the bank holding the key's own node
+    output logic                   iss_own_root,   // update: the key's own node is a root (lo = 0)
     output logic [B-1:0]           iss_bank_en,
     output logic [B*K-1:0]         iss_bank_set,   // K bits per bank
     output logic [W-K-1:0]         iss_reg_en,     // lane j: root {hi with bits below j cleared}
@@ -240,7 +242,7 @@ module salsa_fen_pull_top #(
     end
 
     // ---- stage 2, pull form: no crossbar ---------------------------------------
-    logic [B-1:0]   x_en;
+    logic [B-1:0]   x_en, x_own;
     logic [B*K-1:0] x_set;
     if (!LEVEL) begin : g_pull_rank
         //  Rank placement: bank b owns rank r_b = b - c; it keeps bit j of lo iff
@@ -251,6 +253,7 @@ module salsa_fen_pull_top #(
                 logic [BW-1:0] r;
                 r = BW'(b) - t_c;
                 x_en[b] = tv && !tu && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
+                x_own[b] = 1'b0;
                 for (int unsigned j = 0; j < K; j++)
                     x_set[b*K + j] = t_lo[j] && (t_ts[j*CW +: CW] <= CW'(r));
                 if (!x_en[b]) x_set[b*K +: K] = '0;
@@ -269,6 +272,7 @@ module salsa_fen_pull_top #(
                 has = 1'b0;
                 for (int unsigned j = 0; j < K; j++)
                     if (BW'(j) == l) has = t_lo[j];
+                x_own[b] = tv && tu && (t_lo != '0) && (CW'(l) == t_lv);
                 if (tu)            // update: its own level, or any higher level where lo has a 0
                     x_en[b] = tv && (t_lo != '0) && (CW'(l) < K) &&
                               ((CW'(l) == t_lv) || (CW'(l) > t_lv && !has));
@@ -288,11 +292,14 @@ module salsa_fen_pull_top #(
         always_ff @(posedge clk) begin
             if (!rst_n) begin
                 iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0; iss_root_upd <= '0;
+                iss_own_en <= '0; iss_own_root <= 1'b0;
             end else begin
                 iss_valid   <= tv;
                 iss_bank_en <= x_en;
                 iss_reg_en  <= t_rv;
                 iss_root_upd <= t_ru;
+                iss_own_en   <= x_own;
+                iss_own_root <= tv && tu && (t_lo == '0);
             end
             iss_write    <= tw;
             iss_update   <= tu;
@@ -307,6 +314,8 @@ module salsa_fen_pull_top #(
         assign iss_write    = tw;
         assign iss_update   = tu;
         assign iss_root_upd = tv ? t_ru : '0;
+        assign iss_own_en   = x_own;
+        assign iss_own_root = tv && tu && (t_lo == '0);
         assign iss_bank_set = x_set;
         assign iss_hi       = t_hi;
         assign iss_data     = t_d;

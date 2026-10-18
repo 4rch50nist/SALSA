@@ -4,11 +4,14 @@
 //   s_axi  -> registers (start, run length, counters)
 //
 // Word format (s_axis and m_axis, 64 bits):
-//   [63:62] op (0 query, 1 store, 2 update)  [61:48] seq  [47:32] key  [31:0] value / delta / result
+//   [63:62] op (0 query, 2 update; 1 and 3 reserved, treated as queries)
+//   [61:48] seq  [47:32] key  [31:0] delta / result
+// There is no store: the tree is built by updates from the all-zero state the block
+// RAMs and roots have after configuration (update key i by a[i] for every i).
 
 package salsa_pkg;
   localparam int W = 16, K = 12, B = 16, R = 15;   // key bits, set bits, banks, roots
-  localparam logic [1:0] OP_QUERY = 0, OP_STORE = 1, OP_UPDATE = 2;
+  localparam logic [1:0] OP_QUERY = 0, OP_UPDATE = 2;
   typedef struct packed {
     logic [1:0]  op;
     logic [13:0] seq;
@@ -19,18 +22,20 @@ endpackage
 
 // ---------------------------------------------------------------------------
 // Datapath: front-end + 16 banks + 15 roots + adder.
-//   store : SALSA places the value at the key's node;   result = echo
 //   update: add the delta to every node on the key's update path; result = echo
 //   query : result = sum of every node on the key's query path
-// Bank schedule (edges counted from the front-end's tag register, E1):
-//   E2: port A reads  (queries, updates)     E3: port B writes (stores, updates)
-// The only hazard is the next operation reading, at E2, a node that this one
-// writes at that same edge (E3). Each bank forwards its last write: the compare
-// is made in cycle 2 and registered, and cycle 3 takes the forwarded value
-// instead of the block RAM's. An operation touches at most one node per bank,
-// so one comparator and one multiplexer per bank suffice; nothing ever stalls.
-// Roots are registers: stores and updates change them at E2, and the next
-// operation reads them after that edge.
+// Write lag 2, additive corrections (reference model: lag2_model.py). Principles:
+//  1. a block RAM output feeds only the partial-sum adder (as in Stage 1) and a capture flop;
+//  2. cycle 2 (front end -> block RAM address) is untouched; comparisons run in cycle 3 on
+//     registered addresses;
+//  3. an update reads at E2 and writes at E4, the value q + delta + correction computed in
+//     cycle 4 from flops; a read misses at most ops m-1 and m-2, and since updates only add,
+//     it is corrected by adding their deltas (registers);
+//  4. a query shares at most ONE node with any update (Fenwick: the query's ranges partition
+//     [1, j]; the update's nodes are those whose range contains i), so its correction is
+//     [hit1] d1 + [hit2] d2: no count, no multiply.
+// Every path out of a block RAM ends at a flop; every path into one starts at a flop.
+// Roots are registers (read-modify-write at E2), so they need no correction.
 // ---------------------------------------------------------------------------
 module salsa_datapath import salsa_pkg::*; (
   input  logic               clk, rst,
@@ -42,50 +47,58 @@ module salsa_datapath import salsa_pkg::*; (
   output logic [31:0]        root_stores
 );
   // ---- front-end
-  logic iss_valid, iss_write, iss_update, ready; logic [R-1:0] rupd;
+  logic iss_valid, iss_write, iss_update, ready, own_root; logic [R-1:0] rupd; logic [B-1:0] own;
   logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
 
   salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0), .ISS_REG(1'b0), .LEVEL(1'b1)) u_fe (
     .clk, .rst_n(!rst),
-    .q_valid(in_valid), .q_is_write(in_word.op == OP_STORE), .q_is_update(in_word.op == OP_UPDATE),
+    .q_valid(in_valid), .q_is_write(1'b0), .q_is_update(in_word.op == OP_UPDATE),
     .q_idx(in_word.key), .q_data(in_word.value), .q_ready(ready),
-    .iss_valid, .iss_write, .iss_update, .iss_root_upd(rupd), .iss_bank_en(en), .iss_bank_set(set),
+    .iss_valid, .iss_write, .iss_update, .iss_root_upd(rupd), .iss_own_en(own), .iss_own_root(own_root),
+    .iss_bank_en(en), .iss_bank_set(set),
     .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
 
   // the request word, delayed to line up with the front-end's 1 cycle (tag register only)
   word_t w0;
   always_ff @(posedge clk) w0 <= in_word;
 
-  logic store, query, update;
-  assign store  = iss_valid &&  iss_write;
+  logic query, update;
   assign update = iss_valid &&  iss_update;
-  assign query  = iss_valid && !iss_write && !iss_update;
+  assign query  = iss_valid && !iss_update;
 
-  logic st1; logic [31:0] data1;               // cycle 3: this operation's kind and data
-  always_ff @(posedge clk) begin st1 <= store; data1 <= data; end
+  // deltas by stage: dat3 = this op (cycle 3), dat4 = op m-1, dat5 = op m-2
+  logic [31:0] dat3, dat4, dat5;
+  always_ff @(posedge clk) begin dat3 <= data; dat4 <= dat3; dat5 <= dat4; end
+  logic [B-1:0] en1;                           // cycle 3: query bank enables
+  logic [B-1:0] qh1, qh2;                      // cycle 3: query shares this bank's node with op m-1 / m-2
 
   // ---- 16 banks, 4096 x 32 bits each (simple dual-port block RAM, 1-cycle read)
-  //      port A reads at E2, port B writes at E3; per-bank forwarding of the last write
+  //      read at E2; update write at E4 from flops (write lag 2); READ_FIRST on the write port
   logic [B-1:0][31:0] rd;
   for (genvar b = 0; b < B; b++) begin : g_bank
     (* ram_style = "block" *) logic [31:0] mem [4096];
-    logic [31:0] q, fwd_val, wdata;
-    logic        ren, wen1, hit1;
-    logic [K-1:0] wset1;
+    logic [31:0] q, qreg, xreg, c;
+    logic [K-1:0] s3, s4, s5;                  // this op's set, op m-1's, op m-2's (registered)
+    logic u3, u4, u5, h1, h2, ren;             // bank written by this op / m-1 / m-2
     initial for (int i = 0; i < 4096; i++) mem[i] = 0;
     assign ren = (query || update) && en[b];
-    // cycle 3: the value read (forwarded on a hit) and, for stores and updates, the value to write
-    assign rd[b]  = hit1 ? fwd_val : q;
-    assign wdata  = st1 ? data1 : rd[b] + data1;
+    assign rd[b] = q;                          // partial sums: block RAM data only (Stage 1)
+    // cycle 3, registers only: did op m-1 / m-2 write (or will write) this op's node?
+    assign h1 = u4 && (s4 == s3);
+    assign h2 = u5 && (s5 == s3);
+    assign c  = (h1 ? dat4 : 32'd0) + (h2 ? dat5 : 32'd0);
+    assign qh1[b] = en1[b] && h1;
+    assign qh2[b] = en1[b] && h2;
     always_ff @(posedge clk) begin
-      if (ren)  q <= mem[set[b*K +: K]];                        // port A, E2
-      if (wen1) mem[wset1] <= wdata;                            // port B, E3 (previous op)
-      // forwarding: does this read hit the write landing at this same edge?
-      hit1    <= ren && wen1 && (wset1 == set[b*K +: K]);
-      fwd_val <= wdata;
-      wen1    <= (store || update) && en[b];
-      wset1   <= set[b*K +: K];
-      if (rst) bank_stores[b] <= 0; else if (store && en[b]) bank_stores[b] <= bank_stores[b] + 1;
+      if (ren) q <= mem[set[b*K +: K]];        // E2: read (address path as in Stage 1)
+      if (u4)  mem[s4] <= qreg + xreg;         // E4: write from flops (op in stage 4)
+      qreg <= q;                               // E3: capture the read
+      xreg <= dat3 + c;                        // E3: delta + correction, from registers
+      s3 <= set[b*K +: K]; u3 <= update && en[b];
+      s4 <= s3;            u4 <= u3;
+      s5 <= s4;            u5 <= u4;
+      // balance counter: updates whose OWN node (the key's own level) is in this bank
+      if (rst) bank_stores[b] <= 0; else if (update && own[b]) bank_stores[b] <= bank_stores[b] + 1;
     end
   end
 
@@ -105,18 +118,21 @@ module salsa_datapath import salsa_pkg::*; (
   always_ff @(posedge clk)
     if (rst) begin root <= 0; root_stores <= 0; end
     else begin
-      if (store && rflag != 0) begin
-        for (int h = 0; h < R; h++) if (rflag[h]) root[h] <= data;
-        root_stores <= root_stores + 1;
-      end
-      if (update)                                   // roots on the anchor-space update chain
+      if (update) begin                             // roots on the anchor-space update chain
         for (int h = 0; h < R; h++) if (rupd[h]) root[h] <= root[h] + data;
+        if (own_root) root_stores <= root_stores + 1;   // updates whose own node is a root
+      end
     end
 
   // ---- 1 cycle for the banks, then add: partial sums registered, final add
   //      combinational into the result FIFO / output register
-  logic v1, v2; word_t x1, x2; logic [B-1:0] en1;
+  logic v1, v2; word_t x1, x2; logic [31:0] corr4;
+
   logic [3:0][31:0] rsel1; logic [31:0] rs2; logic [3:0][31:0] part, part_c;
+
+  // query correction (cycle 3, registers only): at most one shared node per pending update
+  logic [31:0] corr_q;
+  assign corr_q = ((|qh1) ? dat4 : 32'd0) + ((|qh2) ? dat5 : 32'd0);
 
   always_comb
     for (int g = 0; g < 4; g++) begin
@@ -127,14 +143,16 @@ module salsa_datapath import salsa_pkg::*; (
   always_ff @(posedge clk) begin
     v1 <= !rst && iss_valid; v2 <= !rst && v1;
     x1 <= w0; en1 <= query ? en : 0; rsel1 <= query ? rsel : '0;
+    corr4 <= corr_q;
     x2 <= x1; part <= part_c;        rs2 <= rsel1[0] + rsel1[1] + rsel1[2] + rsel1[3];
+
   end
 
   // final add, unregistered: the result goes straight to the FIFO or the output register
   always_comb begin
     out_valid = v2;
     out_word  = x2;
-    if (x2.op == OP_QUERY) out_word.value = part[0] + part[1] + part[2] + part[3] + rs2;
+    if (x2.op == OP_QUERY) out_word.value = part[0] + part[1] + part[2] + part[3] + rs2 + corr4;
   end
 endmodule
 
@@ -142,7 +160,9 @@ endmodule
 // Top level: AXI-Stream in/out + AXI-Lite registers. Put this in the block design.
 // Registers: 0x00 CTRL (write 1 = start)   0x04 STATUS (bit0 done)   0x08 RUN_LEN
 //            0x0C CYCLES  0x10 REQ_COUNT  0x14 RES_COUNT  0x18 LATENCY
-//            0x40..0x7C BANK_STORES[0..15]  0x80 ROOT_STORES
+//            0x40..0x7C BANK_STORES[0..15]: updates whose own node is in bank b
+//            0x80 ROOT_STORES: updates whose own node is a root
+//            (build the tree with each key once: 4,095 per bank and 15 roots = exact balance)
 // ---------------------------------------------------------------------------
 module salsa import salsa_pkg::*; #(
   parameter int DEPTH = 32                     // result FIFO; must exceed the datapath latency
