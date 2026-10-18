@@ -37,7 +37,7 @@ module salsa_datapath import salsa_pkg::*; (
   logic iss_valid, iss_write, ready;
   logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
 
-  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0), .ISS_REG(1'b0)) u_fe (
+  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0), .ISS_REG(1'b0), .LEVEL(1'b1)) u_fe (
     .clk, .rst_n(!rst),
     .q_valid(in_valid), .q_is_write(in_word.op == OP_STORE),
     .q_idx(in_word.key), .q_data(in_word.value), .q_ready(ready),

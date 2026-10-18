@@ -30,6 +30,11 @@
 //    Popcount falls by one per chain step and hi is fixed, so the valid
 //    tags of one request carry distinct banks whenever K <= B.
 //
+//  Placement: LEVEL = 0 (default) is the rank placement above; LEVEL = 1 is
+//  level placement, bank = (nu_2(lo) + hi) mod B, the 2-adic valuation of the
+//  body rotated per anchor. Both are conflict-free on query paths and exactly
+//  balanced; the level placement also keeps update paths conflict-free.
+//
 //  Pipeline: input reg -> tag reg -> issue reg. Latency 3, one request per
 //  cycle, q_ready tied high. With IN_REG = 0 the input register is removed
 //  (the request must then come from a register, e.g. an AXI-Stream source):
@@ -118,7 +123,8 @@ module salsa_fen_pull_top #(
     parameter int unsigned B  = 16,
     parameter int unsigned DW = 32,
     parameter bit          IN_REG  = 1'b1,    // 1: register the request first; 0: no input register
-    parameter bit          ISS_REG = 1'b1     // 1: register the issue outputs; 0: drive them directly
+    parameter bit          ISS_REG = 1'b1,    // 1: register the issue outputs; 0: drive them directly
+    parameter bit          LEVEL   = 1'b0     // 0: rank (popcount) placement; 1: level (2-adic) placement
 ) (
     input  wire  logic             clk,
     input  wire  logic             rst_n,
@@ -177,11 +183,19 @@ module salsa_fen_pull_top #(
     wire [CW-1:0] c_pc = c_ts[0 +: CW];          // sigma_0 = popcount(lo)
     wire [BW-1:0] c_c  = BW'(ix[W-1:K]);         // c = g(hi), identity
 
+    // level of the body, nu_2(lo) = position of its lowest set bit (used by stores, LEVEL = 1)
+    logic [CW-1:0] c_lv;
+    always_comb begin
+        c_lv = '0;
+        for (int j = K - 1; j >= 0; j--)
+            if (ix[j]) c_lv = CW'(j);
+    end
+
     // ---- stage 2: tag register (5 bits per lane, plus lo for the masks) ----
     logic            tv, tw;
     logic [K-1:0]    t_tv, t_lo;
     logic [K*CW-1:0] t_ts;
-    logic [CW-1:0]   t_pc;
+    logic [CW-1:0]   t_pc, t_lv;
     logic [BW-1:0]   t_c;
     logic [HW-1:0]   t_rv, t_hi;
     logic [DW-1:0]   t_d;
@@ -191,6 +205,7 @@ module salsa_fen_pull_top #(
         t_rv <= iv ? c_rv : '0;
         t_ts <= c_ts;
         t_pc <= c_pc;
+        t_lv <= c_lv;
         t_c  <= c_c;
         t_lo <= ix[K-1:0];
         t_hi <= ix[W-1:K];
@@ -199,20 +214,41 @@ module salsa_fen_pull_top #(
     end
 
     // ---- stage 2, pull form: no crossbar ---------------------------------------
-    //  bank b owns rank r_b = b - c; it keeps bit j of lo iff sigma_j <= r_b.
-    //  A query uses every rank 1..popcount(lo); an add only its own node,
-    //  whose rank is popcount(lo).
     logic [B-1:0]   x_en;
     logic [B*K-1:0] x_set;
-    always_comb
-        for (int unsigned b = 0; b < B; b++) begin
-            logic [BW-1:0] r;
-            r = BW'(b) - t_c;
-            x_en[b] = tv && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
-            for (int unsigned j = 0; j < K; j++)
-                x_set[b*K + j] = t_lo[j] && (t_ts[j*CW +: CW] <= CW'(r));
-            if (!x_en[b]) x_set[b*K +: K] = '0;
-        end
+    if (!LEVEL) begin : g_pull_rank
+        //  Rank placement: bank b owns rank r_b = b - c; it keeps bit j of lo iff
+        //  sigma_j <= r_b. A query uses every rank 1..popcount(lo); a store only its
+        //  own node, whose rank is popcount(lo).
+        always_comb
+            for (int unsigned b = 0; b < B; b++) begin
+                logic [BW-1:0] r;
+                r = BW'(b) - t_c;
+                x_en[b] = tv && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
+                for (int unsigned j = 0; j < K; j++)
+                    x_set[b*K + j] = t_lo[j] && (t_ts[j*CW +: CW] <= CW'(r));
+                if (!x_en[b]) x_set[b*K +: K] = '0;
+            end
+    end else begin : g_pull_level
+        //  Level placement: bank b owns level l_b = (b - c) mod B, used only if l_b < K.
+        //  A query's node at level l is lo with the bits below l cleared, and exists
+        //  iff bit l of lo is 1. A store writes only its own node, whose level is
+        //  nu_2(lo) (and only if lo != 0; a zero body is a root, in registers).
+        //  No popcount is needed: each set bit is lo[j] AND (j >= l_b).
+        always_comb
+            for (int unsigned b = 0; b < B; b++) begin
+                logic [BW-1:0] l;
+                logic          has;
+                l   = BW'(b) - t_c;
+                has = 1'b0;
+                for (int unsigned j = 0; j < K; j++)
+                    if (BW'(j) == l) has = t_lo[j];
+                x_en[b] = tv && (tw ? ((t_lo != '0) && (CW'(l) == t_lv)) : has);
+                for (int unsigned j = 0; j < K; j++)
+                    x_set[b*K + j] = t_lo[j] && (CW'(j) >= CW'(l));
+                if (!x_en[b]) x_set[b*K +: K] = '0;
+            end
+    end
 
     // ---- stage 3: issue register (optional) -------------------------------
     if (ISS_REG) begin : g_iss_reg
