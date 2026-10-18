@@ -1,14 +1,14 @@
 // salsa.sv: the SALSA system around your front-end (salsa_fenwick_pull.sv).
 //
-//   s_axis -> salsa_datapath (7 cycles, never stalls) -> result FIFO -> m_axis
+//   s_axis -> salsa_datapath (4 cycles, never stalls) -> result FIFO -> m_axis
 //   s_axi  -> registers (start, run length, counters)
 //
 // Word format (s_axis and m_axis, 64 bits):
-//   [63:62] op (0 query, 1 store)  [61:48] seq  [47:32] key  [31:0] value / result
+//   [63:62] op (0 query, 1 store, 2 update)  [61:48] seq  [47:32] key  [31:0] value / delta / result
 
 package salsa_pkg;
   localparam int W = 16, K = 12, B = 16, R = 15;   // key bits, set bits, banks, roots
-  localparam logic [1:0] OP_QUERY = 0, OP_STORE = 1;
+  localparam logic [1:0] OP_QUERY = 0, OP_STORE = 1, OP_UPDATE = 2;
   typedef struct packed {
     logic [1:0]  op;
     logic [13:0] seq;
@@ -19,10 +19,18 @@ endpackage
 
 // ---------------------------------------------------------------------------
 // Datapath: front-end + 16 banks + 15 roots + adder.
-//   store: SALSA places the value; result = value (echo)
-//   query: result = sum of every node on the key's chain
-// Stores write and queries read at the same (issue) stage, in order, so a
-// query always sees earlier stores.
+//   store : SALSA places the value at the key's node;   result = echo
+//   update: add the delta to every node on the key's update path; result = echo
+//   query : result = sum of every node on the key's query path
+// Bank schedule (edges counted from the front-end's tag register, E1):
+//   E2: port A reads  (queries, updates)     E3: port B writes (stores, updates)
+// The only hazard is the next operation reading, at E2, a node that this one
+// writes at that same edge (E3). Each bank forwards its last write: the compare
+// is made in cycle 2 and registered, and cycle 3 takes the forwarded value
+// instead of the block RAM's. An operation touches at most one node per bank,
+// so one comparator and one multiplexer per bank suffice; nothing ever stalls.
+// Roots are registers: stores and updates change them at E2, and the next
+// operation reads them after that edge.
 // ---------------------------------------------------------------------------
 module salsa_datapath import salsa_pkg::*; (
   input  logic               clk, rst,
@@ -34,36 +42,51 @@ module salsa_datapath import salsa_pkg::*; (
   output logic [31:0]        root_stores
 );
   // ---- front-end
-  logic iss_valid, iss_write, ready;
+  logic iss_valid, iss_write, iss_update, ready; logic [R-1:0] rupd;
   logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
 
   salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0), .ISS_REG(1'b0), .LEVEL(1'b1)) u_fe (
     .clk, .rst_n(!rst),
-    .q_valid(in_valid), .q_is_write(in_word.op == OP_STORE),
+    .q_valid(in_valid), .q_is_write(in_word.op == OP_STORE), .q_is_update(in_word.op == OP_UPDATE),
     .q_idx(in_word.key), .q_data(in_word.value), .q_ready(ready),
-    .iss_valid, .iss_write, .iss_bank_en(en), .iss_bank_set(set),
+    .iss_valid, .iss_write, .iss_update, .iss_root_upd(rupd), .iss_bank_en(en), .iss_bank_set(set),
     .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
 
   // the request word, delayed to line up with the front-end's 1 cycle (tag register only)
   word_t w0;
   always_ff @(posedge clk) w0 <= in_word;
 
-  logic store, query;
-  assign store = iss_valid &&  iss_write;
-  assign query = iss_valid && !iss_write;
+  logic store, query, update;
+  assign store  = iss_valid &&  iss_write;
+  assign update = iss_valid &&  iss_update;
+  assign query  = iss_valid && !iss_write && !iss_update;
 
-  // ---- 16 banks, 4096 x 32 bits each (block RAM, 1-cycle read: no output register)
+  logic st1; logic [31:0] data1;               // cycle 3: this operation's kind and data
+  always_ff @(posedge clk) begin st1 <= store; data1 <= data; end
+
+  // ---- 16 banks, 4096 x 32 bits each (simple dual-port block RAM, 1-cycle read)
+  //      port A reads at E2, port B writes at E3; per-bank forwarding of the last write
   logic [B-1:0][31:0] rd;
   for (genvar b = 0; b < B; b++) begin : g_bank
     (* ram_style = "block" *) logic [31:0] mem [4096];
-    logic [31:0] q;
+    logic [31:0] q, fwd_val, wdata;
+    logic        ren, wen1, hit1;
+    logic [K-1:0] wset1;
     initial for (int i = 0; i < 4096; i++) mem[i] = 0;
+    assign ren = (query || update) && en[b];
+    // cycle 3: the value read (forwarded on a hit) and, for stores and updates, the value to write
+    assign rd[b]  = hit1 ? fwd_val : q;
+    assign wdata  = st1 ? data1 : rd[b] + data1;
     always_ff @(posedge clk) begin
-      if (store && en[b]) mem[set[b*K +: K]] <= data;
-      if (query && en[b]) q <= mem[set[b*K +: K]];
+      if (ren)  q <= mem[set[b*K +: K]];                        // port A, E2
+      if (wen1) mem[wset1] <= wdata;                            // port B, E3 (previous op)
+      // forwarding: does this read hit the write landing at this same edge?
+      hit1    <= ren && wen1 && (wset1 == set[b*K +: K]);
+      fwd_val <= wdata;
+      wen1    <= (store || update) && en[b];
+      wset1   <= set[b*K +: K];
       if (rst) bank_stores[b] <= 0; else if (store && en[b]) bank_stores[b] <= bank_stores[b] + 1;
     end
-    assign rd[b] = q;            // read data goes straight to the partial sums
   end
 
   // ---- 15 roots; lane j of iss_reg_en means the root "hi with bits below j cleared"
@@ -81,9 +104,13 @@ module salsa_datapath import salsa_pkg::*; (
   end
   always_ff @(posedge clk)
     if (rst) begin root <= 0; root_stores <= 0; end
-    else if (store && rflag != 0) begin
-      for (int h = 0; h < R; h++) if (rflag[h]) root[h] <= data;
-      root_stores <= root_stores + 1;
+    else begin
+      if (store && rflag != 0) begin
+        for (int h = 0; h < R; h++) if (rflag[h]) root[h] <= data;
+        root_stores <= root_stores + 1;
+      end
+      if (update)                                   // roots on the anchor-space update chain
+        for (int h = 0; h < R; h++) if (rupd[h]) root[h] <= root[h] + data;
     end
 
   // ---- 1 cycle for the banks, then add: partial sums registered, final add

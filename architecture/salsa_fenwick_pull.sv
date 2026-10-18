@@ -30,6 +30,10 @@
 //    Popcount falls by one per chain step and hi is fixed, so the valid
 //    tags of one request carry distinct banks whenever K <= B.
 //
+//  Updates (q_is_update): add q_data to every node on the key's update path
+//  (p, p + lsb(p), ...). Supported with LEVEL = 1 only, where update paths are
+//  conflict-free too; the roots to add to come out on iss_root_upd.
+//
 //  Placement: LEVEL = 0 (default) is the rank placement above; LEVEL = 1 is
 //  level placement, bank = (nu_2(lo) + hi) mod B, the 2-adic valuation of the
 //  body rotated per anchor. Both are conflict-free on query paths and exactly
@@ -131,12 +135,15 @@ module salsa_fen_pull_top #(
     // request
     input  wire  logic             q_valid,
     input  wire  logic             q_is_write,
+    input  wire  logic             q_is_update,    // Fenwick update (add q_data along the path); LEVEL = 1 only
     input  wire  logic [W-1:0]     q_idx,
     input  wire  logic [DW-1:0]    q_data,
     output logic                   q_ready,
     // issue schedule, one request per cycle
     output logic                   iss_valid,
     output logic                   iss_write,
+    output logic                   iss_update,
+    output logic [(1 << (W-K))-2:0] iss_root_upd,  // update: root r (index r-1) must add the delta
     output logic [B-1:0]           iss_bank_en,
     output logic [B*K-1:0]         iss_bank_set,   // K bits per bank
     output logic [W-K-1:0]         iss_reg_en,     // lane j: root {hi with bits below j cleared}
@@ -157,17 +164,18 @@ module salsa_fen_pull_top #(
     assign q_ready = 1'b1;
 
     // ---- stage 1: input register (optional) ------------------------------
-    logic          iv, iw;
+    logic          iv, iw, iu;
     logic [W-1:0]  ix;
     logic [DW-1:0] id;
     if (IN_REG) begin : g_in_reg
         always_ff @(posedge clk) begin
             if (!rst_n) iv <= 1'b0; else iv <= q_valid;
-            iw <= q_is_write; ix <= q_idx; id <= q_data;
+            iw <= q_is_write; iu <= q_is_update; ix <= q_idx; id <= q_data;
         end
     end else begin : g_in_wire
         assign iv = q_valid && rst_n;
         assign iw = q_is_write;
+        assign iu = q_is_update;
         assign ix = q_idx;
         assign id = q_data;
     end
@@ -183,6 +191,21 @@ module salsa_fen_pull_top #(
     wire [CW-1:0] c_pc = c_ts[0 +: CW];          // sigma_0 = popcount(lo)
     wire [BW-1:0] c_c  = BW'(ix[W-1:K]);         // c = g(hi), identity
 
+    // roots an update must add to: the anchor-space update chain from hi + 1
+    // (from hi itself when the body is zero), each root r at index r - 1
+    localparam int unsigned R = (1 << HW) - 1;
+    logic [R-1:0] c_ru;
+    always_comb begin
+        logic [HW:0] v;
+        c_ru = '0;
+        v = (ix[K-1:0] == '0) ? {1'b0, ix[W-1:K]} : {1'b0, ix[W-1:K]} + 1'b1;
+        for (int s = 0; s <= HW; s++)
+            if (v != '0 && v < (1 << HW)) begin
+                c_ru[v - 1] = 1'b1;
+                v = v + (v & (~v + 1'b1));
+            end
+    end
+
     // level of the body, nu_2(lo) = position of its lowest set bit (used by stores, LEVEL = 1)
     logic [CW-1:0] c_lv;
     always_comb begin
@@ -192,7 +215,8 @@ module salsa_fen_pull_top #(
     end
 
     // ---- stage 2: tag register (5 bits per lane, plus lo for the masks) ----
-    logic            tv, tw;
+    logic            tv, tw, tu;
+    logic [R-1:0]    t_ru;
     logic [K-1:0]    t_tv, t_lo;
     logic [K*CW-1:0] t_ts;
     logic [CW-1:0]   t_pc, t_lv;
@@ -202,7 +226,8 @@ module salsa_fen_pull_top #(
     always_ff @(posedge clk) begin
         if (!rst_n) tv <= 1'b0; else tv <= iv;
         t_tv <= iv ? c_tv : '0;
-        t_rv <= iv ? c_rv : '0;
+        t_rv <= (iv && !iu) ? c_rv : '0;      // query/store root lanes; none for updates
+        t_ru <= (iv &&  iu && LEVEL) ? c_ru : '0;
         t_ts <= c_ts;
         t_pc <= c_pc;
         t_lv <= c_lv;
@@ -210,6 +235,7 @@ module salsa_fen_pull_top #(
         t_lo <= ix[K-1:0];
         t_hi <= ix[W-1:K];
         tw   <= iw;
+        tu   <= iu && LEVEL;                    // updates need level placement
         t_d  <= id;
     end
 
@@ -224,7 +250,7 @@ module salsa_fen_pull_top #(
             for (int unsigned b = 0; b < B; b++) begin
                 logic [BW-1:0] r;
                 r = BW'(b) - t_c;
-                x_en[b] = tv && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
+                x_en[b] = tv && !tu && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
                 for (int unsigned j = 0; j < K; j++)
                     x_set[b*K + j] = t_lo[j] && (t_ts[j*CW +: CW] <= CW'(r));
                 if (!x_en[b]) x_set[b*K +: K] = '0;
@@ -243,9 +269,16 @@ module salsa_fen_pull_top #(
                 has = 1'b0;
                 for (int unsigned j = 0; j < K; j++)
                     if (BW'(j) == l) has = t_lo[j];
-                x_en[b] = tv && (tw ? ((t_lo != '0) && (CW'(l) == t_lv)) : has);
+                if (tu)            // update: its own level, or any higher level where lo has a 0
+                    x_en[b] = tv && (t_lo != '0) && (CW'(l) < K) &&
+                              ((CW'(l) == t_lv) || (CW'(l) > t_lv && !has));
+                else
+                    x_en[b] = tv && (tw ? ((t_lo != '0) && (CW'(l) == t_lv)) : has);
                 for (int unsigned j = 0; j < K; j++)
-                    x_set[b*K + j] = t_lo[j] && (CW'(j) >= CW'(l));
+                    if (tu)        // update node at level l: lo with bits up to l cleared, bit l set
+                        x_set[b*K + j] = (CW'(j) > CW'(l)) ? t_lo[j] : (CW'(j) == CW'(l));
+                    else           // query node at level l: lo with the bits below l cleared
+                        x_set[b*K + j] = t_lo[j] && (CW'(j) >= CW'(l));
                 if (!x_en[b]) x_set[b*K +: K] = '0;
             end
     end
@@ -254,13 +287,15 @@ module salsa_fen_pull_top #(
     if (ISS_REG) begin : g_iss_reg
         always_ff @(posedge clk) begin
             if (!rst_n) begin
-                iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0;
+                iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0; iss_root_upd <= '0;
             end else begin
                 iss_valid   <= tv;
                 iss_bank_en <= x_en;
                 iss_reg_en  <= t_rv;
+                iss_root_upd <= t_ru;
             end
             iss_write    <= tw;
+            iss_update   <= tu;
             iss_bank_set <= x_set;
             iss_hi       <= t_hi;
             iss_data     <= t_d;
@@ -270,6 +305,8 @@ module salsa_fen_pull_top #(
         assign iss_bank_en  = x_en;          // already gated by tv
         assign iss_reg_en   = tv ? t_rv : '0;
         assign iss_write    = tw;
+        assign iss_update   = tu;
+        assign iss_root_upd = tv ? t_ru : '0;
         assign iss_bank_set = x_set;
         assign iss_hi       = t_hi;
         assign iss_data     = t_d;
