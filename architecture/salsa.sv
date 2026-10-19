@@ -1,14 +1,12 @@
-// salsa.sv: the SALSA system around your front-end (salsa_fenwick_pull.sv).
-//
-//   s_axis -> salsa_datapath (4 cycles, never stalls) -> result FIFO -> m_axis
-//   s_axi  -> registers (start, run length, counters)
-//
-// Word format (s_axis and m_axis, 64 bits):
-//   [63:62] op (0 query, 2 update; 1 and 3 reserved, treated as queries)
-//   [61:48] seq  [47:32] key  [31:0] delta / result
-// There is no store: the tree is built by updates from the all-zero state the block
-// RAMs and roots have after configuration (update key i by a[i] for every i).
-
+/*
+* s_axis -> salsa_datapath (4 cycles, never stalls) -> result FIFO -> m_axis
+* s_axi  -> registers (start, run length, counters)
+*
+* Word format (s_axis and m_axis, 64 bits):
+* [63:62] op (0 query, 2 update; 1 and 3 reserved, treated as queries)
+* [61:48] seq  [47:32] key  [31:0] delta / result
+* RAMs and roots have after configuration (update key i by a[i] for every i).
+*/
 package salsa_pkg;
   localparam int W = 16, K = 12, B = 16, R = 15;   // key bits, set bits, banks, roots
   localparam logic [1:0] OP_QUERY = 0, OP_UPDATE = 2;
@@ -20,23 +18,23 @@ package salsa_pkg;
   } word_t;
 endpackage
 
-// ---------------------------------------------------------------------------
-// Datapath: front-end + 16 banks + 15 roots + adder.
-//   update: add the delta to every node on the key's update path; result = echo
-//   query : result = sum of every node on the key's query path
-// Write lag 2, additive corrections (reference model: lag2_model.py). Principles:
-//  1. a block RAM output feeds only the partial-sum adder (as in Stage 1) and a capture flop;
-//  2. cycle 2 (front end -> block RAM address) is untouched; comparisons run in cycle 3 on
-//     registered addresses;
-//  3. an update reads at E2 and writes at E4, the value q + delta + correction computed in
-//     cycle 4 from flops; a read misses at most ops m-1 and m-2, and since updates only add,
-//     it is corrected by adding their deltas (registers);
-//  4. a query shares at most ONE node with any update (Fenwick: the query's ranges partition
-//     [1, j]; the update's nodes are those whose range contains i), so its correction is
-//     [hit1] d1 + [hit2] d2: no count, no multiply.
-// Every path out of a block RAM ends at a flop; every path into one starts at a flop.
-// Roots are registers (read-modify-write at E2), so they need no correction.
-// ---------------------------------------------------------------------------
+/*
+* Datapath: front-end + 16 banks + 15 roots + adder.
+* update: add the delta to every node on the key's update path; result = echo
+*   query : result = sum of every node on the key's query path
+* Write lag 2, additive corrections. Principles:
+*  1. a block RAM output feeds only the partial-sum adder (as in Stage 1) and a capture flop;
+*  2. cycle 2 (front end -> block RAM address) is untouched; comparisons run in cycle 3 on
+*     registered addresses;
+*  3. an update reads at E2 and writes at E4, the value q + delta + correction computed in
+*     cycle 4 from flops; a read misses at most ops m-1 and m-2, and since updates only add,
+*     it is corrected by adding their deltas (registers);
+*  4. a query shares at most ONE node with any update (Fenwick: the query's ranges partition
+*     [1, j]; the update's nodes are those whose range contains i), so its correction is
+*     [hit1] d1 + [hit2] d2: no count, no multiply.
+* Every path out of a block RAM ends at a flop; every path into one starts at a flop.
+* Roots are registers (read-modify-write at E2), so they need no correction.
+*/
 module salsa_datapath import salsa_pkg::*; (
   input  logic               clk, rst,
   input  logic               in_valid,
@@ -46,7 +44,6 @@ module salsa_datapath import salsa_pkg::*; (
   output logic [B-1:0][31:0] bank_stores,
   output logic [31:0]        root_stores
 );
-  // ---- front-end
   logic iss_valid, iss_write, iss_update, ready, own_root; logic [R-1:0] rupd; logic [B-1:0] own;
   logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
 
@@ -58,7 +55,7 @@ module salsa_datapath import salsa_pkg::*; (
     .iss_bank_en(en), .iss_bank_set(set),
     .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
 
-  // the request word, delayed to line up with the front-end's 1 cycle (tag register only)
+  /// This is to keep the hardware aligned. 
   word_t w0;
   always_ff @(posedge clk) w0 <= in_word;
 
