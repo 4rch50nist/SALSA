@@ -122,19 +122,19 @@ endmodule
 //  SALSA top, pull form (no crossbar)
 // ===========================================================================
 module salsa_fen_pull_top #(
-    parameter int unsigned W  = 15,
-    parameter int unsigned K  = 11,
+    parameter int unsigned W  = 16,
+    parameter int unsigned K  = 12,
     parameter int unsigned B  = 16,
     parameter int unsigned DW = 32,
-    parameter bit          IN_REG  = 1'b1,    // 1: register the request first; 0: no input register
-    parameter bit          ISS_REG = 1'b1,    // 1: register the issue outputs; 0: drive them directly
+    parameter bit          IN_REG  = 1'b0,    // 1: register the request first; 0: no input register
+    parameter bit          ISS_REG = 1'b0,    // 1: register the issue outputs; 0: drive them directly
     parameter bit          LEVEL   = 1'b0     // 0: rank (popcount) placement; 1: level (2-adic) placement
 ) (
     input  wire  logic             clk,
     input  wire  logic             rst_n,
     // request
     input  wire  logic             q_valid,
-    input  wire  logic             q_is_write,
+    input  wire  logic             q_is_write,      // this is always going to be 0 hence forth.
     input  wire  logic             q_is_update,    // Fenwick update (add q_data along the path); LEVEL = 1 only
     input  wire  logic [W-1:0]     q_idx,
     input  wire  logic [DW-1:0]    q_data,
@@ -169,18 +169,13 @@ module salsa_fen_pull_top #(
     logic          iv, iw, iu;
     logic [W-1:0]  ix;
     logic [DW-1:0] id;
-    if (IN_REG) begin : g_in_reg
-        always_ff @(posedge clk) begin
-            if (!rst_n) iv <= 1'b0; else iv <= q_valid;
-            iw <= q_is_write; iu <= q_is_update; ix <= q_idx; id <= q_data;
-        end
-    end else begin : g_in_wire
-        assign iv = q_valid && rst_n;
-        assign iw = q_is_write;
-        assign iu = q_is_update;
-        assign ix = q_idx;
-        assign id = q_data;
-    end
+
+    assign iv = q_valid && rst_n;
+    assign iw = q_is_write;
+    assign iu = q_is_update;
+    assign ix = q_idx;
+    assign id = q_data;
+
 
     // ---- lazy tags: (valid, sigma) per lane; the offset is applied at the bank
     localparam int unsigned CW = $clog2(K + 1);
@@ -229,7 +224,7 @@ module salsa_fen_pull_top #(
         if (!rst_n) tv <= 1'b0; else tv <= iv;
         t_tv <= iv ? c_tv : '0;
         t_rv <= (iv && !iu) ? c_rv : '0;      // query/store root lanes; none for updates
-        t_ru <= (iv &&  iu && LEVEL) ? c_ru : '0;
+        t_ru <= (iv &&  iu) ? c_ru : '0;
         t_ts <= c_ts;
         t_pc <= c_pc;
         t_lv <= c_lv;
@@ -237,89 +232,55 @@ module salsa_fen_pull_top #(
         t_lo <= ix[K-1:0];
         t_hi <= ix[W-1:K];
         tw   <= iw;
-        tu   <= iu && LEVEL;                    // updates need level placement
+        tu   <= iu;                    // updates need level placement
         t_d  <= id;
     end
 
     // ---- stage 2, pull form: no crossbar ---------------------------------------
     logic [B-1:0]   x_en, x_own;
     logic [B*K-1:0] x_set;
-    if (!LEVEL) begin : g_pull_rank
-        //  Rank placement: bank b owns rank r_b = b - c; it keeps bit j of lo iff
-        //  sigma_j <= r_b. A query uses every rank 1..popcount(lo); a store only its
-        //  own node, whose rank is popcount(lo).
-        always_comb
-            for (int unsigned b = 0; b < B; b++) begin
-                logic [BW-1:0] r;
-                r = BW'(b) - t_c;
-                x_en[b] = tv && !tu && (r != '0) && (CW'(r) <= t_pc) && (!tw || CW'(r) == t_pc);
-                x_own[b] = 1'b0;
-                for (int unsigned j = 0; j < K; j++)
-                    x_set[b*K + j] = t_lo[j] && (t_ts[j*CW +: CW] <= CW'(r));
-                if (!x_en[b]) x_set[b*K +: K] = '0;
-            end
-    end else begin : g_pull_level
-        //  Level placement: bank b owns level l_b = (b - c) mod B, used only if l_b < K.
-        //  A query's node at level l is lo with the bits below l cleared, and exists
-        //  iff bit l of lo is 1. A store writes only its own node, whose level is
-        //  nu_2(lo) (and only if lo != 0; a zero body is a root, in registers).
-        //  No popcount is needed: each set bit is lo[j] AND (j >= l_b).
-        always_comb
-            for (int unsigned b = 0; b < B; b++) begin
-                logic [BW-1:0] l;
-                logic          has;
-                l   = BW'(b) - t_c;
-                has = 1'b0;
-                for (int unsigned j = 0; j < K; j++)
-                    if (BW'(j) == l) has = t_lo[j];
-                x_own[b] = tv && tu && (t_lo != '0) && (CW'(l) == t_lv);
-                if (tu)            // update: its own level, or any higher level where lo has a 0
-                    x_en[b] = tv && (t_lo != '0) && (CW'(l) < K) &&
-                              ((CW'(l) == t_lv) || (CW'(l) > t_lv && !has));
-                else
-                    x_en[b] = tv && (tw ? ((t_lo != '0) && (CW'(l) == t_lv)) : has);
-                for (int unsigned j = 0; j < K; j++)
-                    if (tu)        // update node at level l: lo with bits up to l cleared, bit l set
-                        x_set[b*K + j] = (CW'(j) > CW'(l)) ? t_lo[j] : (CW'(j) == CW'(l));
-                    else           // query node at level l: lo with the bits below l cleared
-                        x_set[b*K + j] = t_lo[j] && (CW'(j) >= CW'(l));
-                if (!x_en[b]) x_set[b*K +: K] = '0;
-            end
-    end
 
-    // ---- stage 3: issue register (optional) -------------------------------
-    if (ISS_REG) begin : g_iss_reg
-        always_ff @(posedge clk) begin
-            if (!rst_n) begin
-                iss_valid <= 1'b0; iss_bank_en <= '0; iss_reg_en <= '0; iss_root_upd <= '0;
-                iss_own_en <= '0; iss_own_root <= 1'b0;
-            end else begin
-                iss_valid   <= tv;
-                iss_bank_en <= x_en;
-                iss_reg_en  <= t_rv;
-                iss_root_upd <= t_ru;
-                iss_own_en   <= x_own;
-                iss_own_root <= tv && tu && (t_lo == '0);
-            end
-            iss_write    <= tw;
-            iss_update   <= tu;
-            iss_bank_set <= x_set;
-            iss_hi       <= t_hi;
-            iss_data     <= t_d;
+    //  Level placement: bank b owns level l_b = (b - c) mod B, used only if l_b < K.
+    //  A query's node at level l is lo with the bits below l cleared, and exists
+    //  iff bit l of lo is 1. A store writes only its own node, whose level is
+    //  nu_2(lo) (and only if lo != 0; a zero body is a root, in registers).
+    //  No popcount is needed: each set bit is lo[j] AND (j >= l_b).
+    always_comb
+        for (int unsigned b = 0; b < B; b++) begin
+            logic [BW-1:0] l;
+            logic          has;
+            l   = BW'(b) - t_c;
+            has = 1'b0;
+            for (int unsigned j = 0; j < K; j++)
+                if (BW'(j) == l) has = t_lo[j];
+            x_own[b] = tv && tu && (t_lo != '0) && (CW'(l) == t_lv);
+            if (tu)            // update: its own level, or any higher level where lo has a 0
+                x_en[b] = tv && (t_lo != '0) && (CW'(l) < K) &&
+                            ((CW'(l) == t_lv) || (CW'(l) > t_lv && !has));
+            else
+                x_en[b] = tv && (tw ? ((t_lo != '0) && (CW'(l) == t_lv)) : has);
+            for (int unsigned j = 0; j < K; j++)
+                if (tu)        // update node at level l: lo with bits up to l cleared, bit l set
+                    x_set[b*K + j] = (CW'(j) > CW'(l)) ? t_lo[j] : (CW'(j) == CW'(l));
+                else           // query node at level l: lo with the bits below l cleared
+                    x_set[b*K + j] = t_lo[j] && (CW'(j) >= CW'(l));
+            if (!x_en[b]) x_set[b*K +: K] = '0;
         end
-    end else begin : g_iss_wire
-        assign iss_valid    = tv;
-        assign iss_bank_en  = x_en;          // already gated by tv
-        assign iss_reg_en   = tv ? t_rv : '0;
-        assign iss_write    = tw;
-        assign iss_update   = tu;
-        assign iss_root_upd = tv ? t_ru : '0;
-        assign iss_own_en   = x_own;
-        assign iss_own_root = tv && tu && (t_lo == '0);
-        assign iss_bank_set = x_set;
-        assign iss_hi       = t_hi;
-        assign iss_data     = t_d;
-    end
+
+
+
+    assign iss_valid    = tv;
+    assign iss_bank_en  = x_en;          // already gated by tv
+    assign iss_reg_en   = tv ? t_rv : '0;
+    assign iss_write    = tw;
+    assign iss_update   = tu;
+    assign iss_root_upd = tv ? t_ru : '0;
+    assign iss_own_en   = x_own;
+    assign iss_own_root = tv && tu && (t_lo == '0);
+    assign iss_bank_set = x_set;
+    assign iss_hi       = t_hi;
+    assign iss_data     = t_d;
+
 
     // no conflict assertion: each bank selects exactly one rank by construction
 endmodule
