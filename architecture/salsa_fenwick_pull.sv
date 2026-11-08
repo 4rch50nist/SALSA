@@ -41,17 +41,13 @@ module salsa_fen_pull_top #(
     assign ix = q_idx;
     assign id = q_data;
 
-
-    // ---- lazy tags: (valid, sigma) per lane; the offset is applied at the bank
     localparam int unsigned CW = $clog2(K + 1);
     logic [HW-1:0]   c_rv; 
 
     assign c_rv = ix[W-1:K];
 
-    wire [BW-1:0] c_c  = BW'(ix[W-1:K]);         // c = g(hi), identity
+    wire [BW-1:0] c_c  = BW'(ix[W-1:K]);     
 
-    // roots an update must add to: the anchor-space update chain from hi + 1
-    // (from hi itself when the body is zero), each root r at index r - 1
     localparam int unsigned R = (1 << HW) - 1;
     logic [R-1:0] c_ru;
     always_comb begin
@@ -65,7 +61,6 @@ module salsa_fen_pull_top #(
             end
     end
 
-    // level of the body, nu_2(lo) = position of its lowest set bit (used by stores, LEVEL = 1)
     logic [CW-1:0] c_lv;
     always_comb begin
         c_lv = '0;
@@ -73,7 +68,6 @@ module salsa_fen_pull_top #(
             if (ix[j]) c_lv = CW'(j);
     end
 
-    // ---- stage 2: tag register (5 bits per lane, plus lo for the masks) ----
     logic            tv, tu;
     logic [R-1:0]    t_ru;
     logic [K-1:0]    t_lo;
@@ -83,25 +77,19 @@ module salsa_fen_pull_top #(
     logic [DW-1:0]   t_d;
     always_ff @(posedge clk) begin
         if (!rst_n) tv <= 1'b0; else tv <= iv;
-        t_rv <= (iv && !iu) ? c_rv : '0;      // query/store root lanes; none for updates
+        t_rv <= (iv && !iu) ? c_rv : '0;    
         t_ru <= (iv &&  iu) ? c_ru : '0;
         t_lv <= c_lv;
         t_c  <= c_c;
         t_lo <= ix[K-1:0];
         t_hi <= ix[W-1:K];
-        tu   <= iu;                    // updates need level placement
+        tu   <= iu;                  
         t_d  <= id;
     end
 
-    // ---- stage 2, pull form: no crossbar ---------------------------------------
     logic [B-1:0]   x_en, x_own;
     logic [B*K-1:0] x_set;
 
-    //  Level placement: bank b owns level l_b = (b - c) mod B, used only if l_b < K.
-    //  A query's node at level l is lo with the bits below l cleared, and exists
-    //  iff bit l of lo is 1. A store writes only its own node, whose level is
-    //  nu_2(lo) (and only if lo != 0; a zero body is a root, in registers).
-    //  No popcount is needed: each set bit is lo[j] AND (j >= l_b).
     always_comb
         for (int unsigned b = 0; b < B; b++) begin
             logic [BW-1:0] l;
@@ -111,23 +99,21 @@ module salsa_fen_pull_top #(
             for (int unsigned j = 0; j < K; j++)
                 if (BW'(j) == l) has = t_lo[j];
             x_own[b] = tv && tu && (t_lo != '0) && (CW'(l) == t_lv);
-            if (tu)            // update: its own level, or any higher level where lo has a 0
+            if (tu)       
                 x_en[b] = tv && (t_lo != '0) && (CW'(l) < K) &&
                             ((CW'(l) == t_lv) || (CW'(l) > t_lv && !has));
             else
                 x_en[b] = tv &&  has;
             for (int unsigned j = 0; j < K; j++)
-                if (tu)        // update node at level l: lo with bits up to l cleared, bit l set
+                if (tu)   
                     x_set[b*K + j] = (CW'(j) > CW'(l)) ? t_lo[j] : (CW'(j) == CW'(l));
-                else           // query node at level l: lo with the bits below l cleared
+                else   
                     x_set[b*K + j] = t_lo[j] && (CW'(j) >= CW'(l));
             if (!x_en[b]) x_set[b*K +: K] = '0;
         end
 
-
-
     assign iss_valid    = tv;
-    assign iss_bank_en  = x_en;          // already gated by tv
+    assign iss_bank_en  = x_en;     
     assign iss_reg_en   = tv ? t_rv : '0;
     assign iss_update   = tu;
     assign iss_root_upd = tv ? t_ru : '0;
@@ -138,7 +124,6 @@ module salsa_fen_pull_top #(
     assign iss_data     = t_d;
 
 
-    // no conflict assertion: each bank selects exactly one rank by construction
 endmodule
 
 `default_nettype wire

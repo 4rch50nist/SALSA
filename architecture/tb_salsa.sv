@@ -1,62 +1,93 @@
-// Exhaustive check of the level-placement front end, against an independent model:
-// walk each Fenwick path node by node and place every banked node at
-// bank (nu_2(lo) + hi) mod 16, set = lo. Queries: p, p - lsb(p), ... (whole key).
-// Updates: p, p + lsb(p), ... within the body (lo), until it overflows into a root.
-// Also checks that every path uses each bank at most once.
-module tb_fe;
-  localparam int W = 16, K = 12, B = 16;
-  logic clk = 0, rst_n = 0;
-  always #1 clk = ~clk;
-  logic q_valid = 0, q_is_update = 0; logic [W-1:0] q_idx = 0;
-  logic iss_valid; logic [B-1:0] en; logic [B*K-1:0] set;
-  logic [W-K-1:0] reg_en, hi_o; logic [31:0] d;
-  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32))  dut (
-    .clk, .rst_n, .q_valid, .q_is_update, .q_idx, .q_data(32'd0),
-    .iss_valid, .iss_update(), .iss_root_upd(), .iss_own_en(), .iss_own_root(),
-    .iss_bank_en(en), .iss_bank_set(set), .iss_reg_en(reg_en),
-    .iss_hi(hi_o), .iss_data(d));
+// System test: random queries and updates over AXI-Stream with random back-pressure,
+// checked against a software Fenwick tree (prefix sums over keys 1 .. 2^W - 1).
+// Hot-key bursts make consecutive ops share nodes, so the write-lag forwarding is exercised.
+module tb_system;
+  import salsa_pkg::*;
+  logic aclk = 0, aresetn = 0;
+  always #5 aclk = ~aclk;
 
-  function automatic int nu2(int x); int v = 0; while ((x & 1) == 0) begin x >>= 1; v++; end return v; endfunction
+  logic [63:0] s_tdata; logic s_tvalid = 0, s_tready;
+  logic [63:0] m_tdata; logic m_tvalid, m_tready = 0, m_tlast;
 
-  int errors = 0, checked = 0;
-  task automatic check(input int p, input bit update);
-    logic [B-1:0] e_en; logic [K-1:0] e_set [B]; int x, hi, lo, b;
-    e_en = '0; for (int i = 0; i < B; i++) e_set[i] = '0;
-    hi = p >> K;
-    if (update) begin
-      for (x = p & ((1 << K) - 1); x != 0 && x < (1 << K); x = x + (x & -x)) begin   // the update path in the body
-        b = (nu2(x) + hi) % B;
-        if (e_en[b]) begin errors++; $display("model conflict at key %0d", p); end
-        e_en[b] = 1; e_set[b] = x[K-1:0];
-      end
-    end else begin
-      x = p;
-      while (x != 0) begin                       // the query path, node by node
-        lo = x & ((1 << K) - 1);
-        if (lo != 0) begin
-          b = (nu2(lo) + hi) % B;
-          if (e_en[b]) begin errors++; $display("model conflict at key %0d", p); end
-          e_en[b] = 1; e_set[b] = lo;
-        end
-        x = x - (x & -x);
+  salsa #(.DEPTH(4)) dut (
+    .aclk, .aresetn,
+    .s_axis_tdata(s_tdata), .s_axis_tvalid(s_tvalid), .s_axis_tready(s_tready), .s_axis_tlast(1'b0),
+    .m_axis_tdata(m_tdata), .m_axis_tvalid(m_tvalid), .m_axis_tready(m_tready), .m_axis_tlast(m_tlast),
+    .s_axi_awaddr('0), .s_axi_awprot('0), .s_axi_awvalid(1'b0), .s_axi_awready(),
+    .s_axi_wdata('0), .s_axi_wstrb('0), .s_axi_wvalid(1'b0), .s_axi_wready(),
+    .s_axi_bresp(), .s_axi_bvalid(), .s_axi_bready(1'b1),
+    .s_axi_araddr('0), .s_axi_arprot('0), .s_axi_arvalid(1'b0), .s_axi_arready(),
+    .s_axi_rdata(), .s_axi_rresp(), .s_axi_rvalid(), .s_axi_rready(1'b1));
+
+  localparam int N = 1 << W;
+  int unsigned val [N];                 // the array the tree represents
+  word_t expected [$];                  // results in issue order
+  int sent = 0, got = 0, errors = 0, updates = 0, own_updates = 0;
+  localparam int OPS = 200000;
+
+  function automatic int unsigned prefix(int p);
+    int unsigned s = 0;
+    for (int i = 1; i <= p; i++) s += val[i];
+    return s;
+  endfunction
+
+  // pick a key: half the time from a small hot window, so neighbouring ops share nodes
+  int hot_base;
+  function automatic int pick_key();
+    if ($urandom % 2) return 1 + (hot_base + $urandom % 8) % (N - 1);
+    return 1 + $urandom % (N - 1);
+  endfunction
+
+  word_t w;
+  initial begin
+    for (int i = 0; i < N; i++) val[i] = 0;
+    repeat (4) @(posedge aclk); aresetn <= 1;
+    hot_base = $urandom % N;
+    while (sent < OPS) begin
+      @(posedge aclk);
+      if (s_tvalid && s_tready) sent++;           // previous word accepted
+      if (!s_tvalid || s_tready) begin
+        if (sent < OPS && ($urandom % 8 != 0)) begin
+          if ($urandom % 64 == 0) hot_base = $urandom % N;
+          w.op    = ($urandom % 2) ? OP_UPDATE : (($urandom % 8 == 0) ? 2'd1 : OP_QUERY); // some reserved op 1
+          w.seq   = SEQW'(sent);
+          w.key   = W'(pick_key());
+          w.value = $urandom;
+          // the model, in issue order
+          if (w.op == OP_UPDATE) begin
+            val[w.key] += w.value; updates++;
+            expected.push_back(w);                // update echoes its word
+          end else begin
+            word_t e = w; e.value = prefix(w.key);
+            expected.push_back(e);
+          end
+          s_tdata  <= w;
+          s_tvalid <= 1;
+        end else s_tvalid <= 0;
       end
     end
-    if (en !== e_en) begin errors++; if (errors < 6) $display("key %0d %s: en %h, want %h", p, update ? "update" : "query", en, e_en); end
-    for (int i = 0; i < B; i++)
-      if (e_en[i] && set[i*K +: K] !== e_set[i]) begin errors++; if (errors < 6) $display("key %0d bank %0d: set %h, want %h", p, i, set[i*K +: K], e_set[i]); end
-    checked++;
-  endtask
-
-  initial begin
-    repeat (3) @(posedge clk); rst_n = 1;
-    for (int up = 0; up < 2; up++)
-      for (int p = 1; p < (1 << W); p++) begin
-        @(negedge clk); q_valid = 1; q_is_update = up[0]; q_idx = p[W-1:0];
-        @(posedge clk); #0.5;                    // tag register loaded: outputs valid now
-        check(p, up[0]);
-      end
-    $display("front end, level placement: %0d checks (every key as query and as update), %0d errors: %s",
-             checked, errors, errors ? "FAIL" : "PASS");
+    @(posedge aclk); s_tvalid <= 0;
+    wait (got == OPS);
+    begin
+      int unsigned total = dut.u_dp.root_stores;
+      for (int b = 0; b < B; b++) total += dut.u_dp.bank_stores[b];
+      if (total != updates) begin errors++; $display("own-node counters %0d, updates %0d", total, updates); end
+    end
+    $display("W=%0d K=%0d B=%0d: %0d ops, %0d updates, %0d errors: %s", W, K, B, OPS, updates, errors, errors ? "FAIL" : "PASS");
     $finish;
+  end
+
+  // consumer with random back-pressure; check every result in order
+  always @(posedge aclk) begin
+    m_tready <= ($urandom % 4 != 0);
+    if (m_tvalid && m_tready) begin
+      word_t r, e;
+      r = m_tdata; e = expected.pop_front(); got++;
+      if (r !== e) begin
+        errors++;
+        if (errors < 6) $display("result %0d: op %0d key %0d got %0d want %0d (seq %0d/%0d)",
+                                 got, r.op, r.key, r.value, e.value, r.seq, e.seq);
+      end
+    end
   end
 endmodule
