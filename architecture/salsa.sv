@@ -44,14 +44,14 @@ module salsa_datapath import salsa_pkg::*; (
   output logic [B-1:0][31:0] bank_stores,
   output logic [31:0]        root_stores
 );
-  logic iss_valid, iss_write, iss_update, ready, own_root; logic [R-1:0] rupd; logic [B-1:0] own;
+  logic iss_valid, iss_write, iss_update, own_root; logic [R-1:0] rupd; logic [B-1:0] own;
   logic [B-1:0] en; logic [B*K-1:0] set; logic [3:0] lane, hi; logic [31:0] data;
 
-  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32), .IN_REG(1'b0), .ISS_REG(1'b0), .LEVEL(1'b1)) u_fe (
+  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32)) u_fe (
     .clk, .rst_n(!rst),
-    .q_valid(in_valid), .q_is_write(1'b0), .q_is_update(in_word.op == OP_UPDATE),
-    .q_idx(in_word.key), .q_data(in_word.value), .q_ready(ready),
-    .iss_valid, .iss_write, .iss_update, .iss_root_upd(rupd), .iss_own_en(own), .iss_own_root(own_root),
+    .q_valid(in_valid), .q_is_update(in_word.op == OP_UPDATE),
+    .q_idx(in_word.key), .q_data(in_word.value),
+    .iss_valid, .iss_update, .iss_root_upd(rupd), .iss_own_en(own), .iss_own_root(own_root),
     .iss_bank_en(en), .iss_bank_set(set),
     .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
 

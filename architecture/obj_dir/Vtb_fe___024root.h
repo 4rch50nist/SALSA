@@ -18,10 +18,8 @@ class alignas(VL_CACHE_LINE_BYTES) Vtb_fe___024root final {
     CData/*0:0*/ tb_fe__DOT__clk;
     CData/*0:0*/ tb_fe__DOT__rst_n;
     CData/*0:0*/ tb_fe__DOT__q_valid;
-    CData/*0:0*/ tb_fe__DOT__q_is_write;
-    CData/*0:0*/ tb_fe__DOT__dut__DOT__q_is_update;
+    CData/*0:0*/ tb_fe__DOT__q_is_update;
     CData/*0:0*/ tb_fe__DOT__dut__DOT__tv;
-    CData/*0:0*/ tb_fe__DOT__dut__DOT__tw;
     CData/*0:0*/ tb_fe__DOT__dut__DOT__tu;
     CData/*3:0*/ tb_fe__DOT__dut__DOT__t_lv;
     CData/*3:0*/ tb_fe__DOT__dut__DOT__t_c;
