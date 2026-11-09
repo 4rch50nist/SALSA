@@ -1,9 +1,13 @@
+`timescale 1ns/1ps
 package salsa_pkg;
   localparam int W    = 16, K = 12;
   localparam int HW   = W - K;
   localparam int B    = 1 << HW;
   localparam int R    = B - 1;
+  localparam int NL   = W + 1;
+  localparam int LW   = $clog2(NL);
   localparam int SEQW = 64 - 2 - W - 32;
+  localparam bit MIN  = 1'b0;
   localparam logic [1:0] OP_QUERY = 0, OP_UPDATE = 2;
   typedef struct packed {
     logic [1:0]      op;
@@ -11,6 +15,11 @@ package salsa_pkg;
     logic [W-1:0]    key;
     logic [31:0]     value;
   } word_t;
+  function automatic logic [31:0] combine(input logic [31:0] x, input logic [31:0] y);
+    if (MIN) return (x < y) ? x : y;
+    else     return (x > y) ? x : y;
+  endfunction
+  localparam logic [31:0] ID = MIN ? '1 : '0;
 endpackage
 
 module salsa_datapath import salsa_pkg::*; (
@@ -22,8 +31,6 @@ module salsa_datapath import salsa_pkg::*; (
   output logic [B-1:0][31:0] bank_stores,
   output logic [31:0]        root_stores
 );
-  localparam int GS = 4, NG = B / GS;
-
 `ifndef SYNTHESIS
   initial begin
     if (HW < 2)    $fatal(1, "need W - K >= 2 (at least 4 banks)");
@@ -31,103 +38,100 @@ module salsa_datapath import salsa_pkg::*; (
   end
 `endif
 
-  logic iss_valid, iss_update, own_root; logic [R-1:0] rupd; logic [B-1:0] own;
-  logic [B-1:0] en; logic [B*K-1:0] set; logic [HW-1:0] lane, hi; logic [31:0] data;
+  logic iss_valid, iss_update; logic [31:0] data;
+  logic [NL-1:0][1:0][W:0] cand; logic [NL-1:0][1:0] cval, isp;
+  logic [1:0][B-1:0] ren, wen; logic [1:0][B-1:0][K-1:0] addr; logic [1:0][B-1:0][LW-1:0] lvl;
 
-  salsa_fen_pull_top #(.W(W), .K(K), .B(B), .DW(32)) u_fe (
+  salsa_segment_pull_top #(.W(W), .K(K), .B(B), .DW(32)) u_fe (
     .clk, .rst_n(!rst),
     .q_valid(in_valid), .q_is_update(in_word.op == OP_UPDATE),
     .q_idx(in_word.key), .q_data(in_word.value),
-    .iss_valid, .iss_update, .iss_root_upd(rupd), .iss_own_en(own), .iss_own_root(own_root),
-    .iss_bank_en(en), .iss_bank_set(set),
-    .iss_reg_en(lane), .iss_hi(hi), .iss_data(data));
+    .iss_valid, .iss_update, .iss_cand(cand), .iss_cval(cval), .iss_isp(isp),
+    .iss_ren(ren), .iss_wen(wen), .iss_addr(addr), .iss_lvl(lvl), .iss_data(data));
 
   word_t w0;
   always_ff @(posedge clk) w0 <= in_word;
 
-  logic query, update;
-  assign update = iss_valid &&  iss_update;
-  assign query  = iss_valid && !iss_update;
+  logic v3, u3, v4, u4, u5; logic [31:0] d3, res4; word_t w3, w4;
+  logic [NL-1:0][1:0][W:0] cand3; logic [NL-1:0][1:0] cval3, isp3;
+  logic [NL-1:0][31:0] p4, p5; logic [NL-1:0][W:0] path4, path5;
 
-  logic [31:0] dat3, dat4, dat5;
-  always_ff @(posedge clk) begin dat3 <= data; dat4 <= dat3; dat5 <= dat4; end
-  logic [B-1:0] en1;
-  logic [B-1:0] qh1, qh2;
-
-  logic [B-1:0][31:0] rd;
-  for (genvar b = 0; b < B; b++) begin : g_bank
-    (* ram_style = "block" *) logic [31:0] mem [1 << K];
-    logic [31:0] q, qreg, xreg, c;
-    logic [K-1:0] s3, s4, s5;
-    logic u3, u4, u5, h1, h2, ren;
-    initial for (int i = 0; i < (1 << K); i++) mem[i] = 0;
-    assign ren = (query || update) && en[b];
-    assign rd[b] = q;
-    assign h1 = u4 && (s4 == s3);
-    assign h2 = u5 && (s5 == s3);
-    assign c  = (h1 ? dat4 : 32'd0) + (h2 ? dat5 : 32'd0);
-    assign qh1[b] = en1[b] && h1;
-    assign qh2[b] = en1[b] && h2;
-    always_ff @(posedge clk) begin
-      if (ren) q <= mem[set[b*K +: K]];
-      if (u4)  mem[s4] <= qreg + xreg;
-      qreg <= q;
-      xreg <= dat3 + c;
-      s3 <= set[b*K +: K]; u3 <= update && en[b];
-      s4 <= s3;            u4 <= u3;
-      s5 <= s4;            u5 <= u4;
-      if (rst) bank_stores[b] <= 0; else if (update && own[b]) bank_stores[b] <= bank_stores[b] + 1;
+  logic [1:0][B-1:0][31:0] q; logic [1:0][B-1:0] ren3; logic [1:0][B-1:0][LW-1:0] lvl3;
+  logic [1:0][B-1:0] wen4;
+  for (genvar p = 0; p < 2; p++) begin : g_half
+    for (genvar b = 0; b < B; b++) begin : g_bank
+      (* ram_style = "block" *) logic [31:0] mem [1 << K];
+      logic wen3; logic [K-1:0] wa3, wa4; logic [LW-1:0] wl4;
+      initial for (int i = 0; i < (1 << K); i++) mem[i] = ID;
+      always_ff @(posedge clk) begin
+        if (ren[p][b])  q[p][b] <= mem[addr[p][b]];
+        if (wen4[p][b]) mem[wa4] <= p4[wl4];
+        ren3[p][b] <= ren[p][b]; lvl3[p][b] <= lvl[p][b];
+        wen3 <= wen[p][b];       wa3 <= addr[p][b];
+        wen4[p][b] <= wen3;      wa4 <= wa3;     wl4 <= lvl3[p][b];
+      end
     end
   end
 
-  logic [R-1:0][31:0] root; logic [HW-1:0][31:0] rsel;
-  always_comb
-    for (int j = 0; j < HW; j++) begin
-      logic [HW-1:0] idx;
-      idx = (hi & ~HW'((1 << j) - 1)) - 1'b1;
-      rsel[j] = (lane[j] && idx < R) ? root[idx] : 32'd0;
-    end
   always_ff @(posedge clk)
-    if (rst) begin root <= 0; root_stores <= 0; end
-    else begin
-      if (update) begin
-        for (int h = 0; h < R; h++) if (rupd[h]) root[h] <= root[h] + data;
-        if (own_root) root_stores <= root_stores + 1;
-      end
+    for (int b = 0; b < B; b++)
+      if (rst) bank_stores[b] <= 0;
+      else     bank_stores[b] <= bank_stores[b] + wen4[0][b] + wen4[1][b];
+
+  logic [R:1][31:0] root; logic [NL-1:0][1:0][31:0] rq3;
+  always_ff @(posedge clk) begin
+    for (int L = 0; L < NL; L++)
+      for (int p = 0; p < 2; p++)
+        rq3[L][p] <= (L < HW && cand[L][p][HW-1:0] != 0) ? root[int'(cand[L][p][HW-1:0])] : ID;
+    if (rst) begin root <= {R{ID}}; root_stores <= 0; end
+    else if (v4 && u4) begin
+      for (int L = 0; L < HW; L++) root[int'(path4[L][HW-1:0])] <= p4[L];
+      root_stores <= root_stores + 1;
     end
-
-  logic v1, v2; word_t x1, x2; logic [31:0] corr4;
-
-  logic [HW-1:0][31:0] rsel1; logic [31:0] rs_c, rs2; logic [NG-1:0][31:0] part, part_c;
-
-  logic [31:0] corr_q;
-  assign corr_q = ((|qh1) ? dat4 : 32'd0) + ((|qh2) ? dat5 : 32'd0);
-
-  always_comb
-    for (int g = 0; g < NG; g++) begin
-      part_c[g] = 0;
-      for (int k = 0; k < GS; k++) if (en1[GS*g+k]) part_c[g] += rd[GS*g+k];
-    end
-
-  always_comb begin
-    rs_c = 0;
-    for (int j = 0; j < HW; j++) rs_c += rsel1[j];
   end
 
   always_ff @(posedge clk) begin
-    v1 <= !rst && iss_valid; v2 <= !rst && v1;
-    x1 <= w0; en1 <= query ? en : 0; rsel1 <= query ? rsel : '0;
-    corr4 <= corr_q;
-    x2 <= x1; part <= part_c;        rs2 <= rs_c;
+    v3 <= !rst && iss_valid; u3 <= iss_update; d3 <= data;
+    cand3 <= cand; cval3 <= cval; isp3 <= isp; w3 <= w0;
   end
 
-  logic [31:0] sum;
+  logic [NL-1:0][1:0][31:0] fv; logic [NL-1:0][31:0] p3; logic [NL-1:0][W:0] path3; logic [31:0] res3;
+  always_comb
+    for (int L = 0; L < NL; L++)
+      for (int p = 0; p < 2; p++) begin
+        fv[L][p] = rq3[L][p];
+        if (L >= HW)
+          for (int b = 0; b < B; b++)
+            if (ren3[p][b] && lvl3[p][b] == LW'(L)) fv[L][p] = q[p][b];
+        if      (v4 && u4 && path4[L] == cand3[L][p]) fv[L][p] = p4[L];
+        else if (u5       && path5[L] == cand3[L][p]) fv[L][p] = p5[L];
+      end
+
   always_comb begin
-    sum = rs2 + corr4;
-    for (int g = 0; g < NG; g++) sum += part[g];
-    out_valid = v2;
-    out_word  = x2;
-    if (x2.op != OP_UPDATE) out_word.value = sum;
+    logic [NL-1:0][31:0] e, nxt;
+    for (int L = 0; L < NL; L++) path3[L] = isp3[L][1] ? cand3[L][1] : cand3[L][0];
+    e[0] = d3;
+    for (int k = 1; k < NL; k++) e[k] = isp3[W-k+1][1] ? fv[W-k+1][0] : fv[W-k+1][1];
+    for (int d = 1; d < NL; d <<= 1) begin
+      nxt = e;
+      for (int k = d; k < NL; k++) nxt[k] = combine(e[k], e[k-d]);
+      e = nxt;
+    end
+    for (int k = 0; k < NL; k++) p3[W-k] = e[k];
+    res3 = ID;
+    for (int L = 0; L < NL; L++)
+      for (int p = 0; p < 2; p++) if (cval3[L][p]) res3 = combine(res3, fv[L][p]);
+  end
+
+  always_ff @(posedge clk) begin
+    v4 <= !rst && v3; u4 <= u3; p4 <= p3; path4 <= path3; res4 <= res3; w4 <= w3;
+    u5 <= !rst && v4 && u4; p5 <= p4; path5 <= path4;
+  end
+
+  always_comb begin
+    out_valid = v4;
+    out_word  = w4;
+    if (w4.op != OP_UPDATE) out_word.value = res4;
   end
 endmodule
 
