@@ -58,7 +58,8 @@ module tb_system;
             val[w.key] += w.value; updates++;
             expected.push_back(w);                // update echoes its word
           end else begin
-            word_t e = w; e.value = prefix(w.key);
+            word_t e;
+            e = w; e.value = prefix(w.key);
             expected.push_back(e);
           end
           s_tdata  <= w;
@@ -69,7 +70,8 @@ module tb_system;
     @(posedge aclk); s_tvalid <= 0;
     wait (got == OPS);
     begin
-      int unsigned total = dut.u_dp.root_stores;
+      int unsigned total;
+      total = dut.u_dp.root_stores;
       for (int b = 0; b < B; b++) total += dut.u_dp.bank_stores[b];
       if (total != updates) begin errors++; $display("own-node counters %0d, updates %0d", total, updates); end
     end
