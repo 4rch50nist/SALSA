@@ -1,0 +1,322 @@
+\documentclass{standalone}
+
+
+\usepackage{amssymb}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,decorations,decorations.pathreplacing,patterns,shapes.geometric}
+\begin{document}
+\colorlet{cCt}{black}
+\colorlet{cLo}{black!72}
+\colorlet{cHi}{black!55}
+\colorlet{cLv}{black!42}
+\colorlet{cK}{black!30}
+\colorlet{dw}{black!6}
+\colorlet{cF}{red!81!cyan!64}
+\begin{tikzpicture}[
+		>={Stealth[length=2.2mm]}, font=\sffamily\footnotesize,
+		ip/.style={fill=white},
+		plug/.style={draw, double, double distance=1.1pt, fill=white, align=center, inner sep=3pt},
+		unit/.style={draw, fill=white, align=center, inner sep=3pt},
+		box/.style={draw, fill=white, align=center, inner sep=2pt},
+		op/.style={draw, fill=white, circle, inner sep=0pt, minimum size=0.55cm},
+		gate/.style={draw, fill=white, line width=0.5pt},
+		mux/.style={draw, fill=white, trapezium, trapezium angle=70, shape border rotate=270, inner sep=1pt},
+		cell/.style={draw, line width=0.5pt, minimum width=0.2cm, minimum height=0.42cm, inner sep=0pt},
+		w/.style={line width=0.6pt},
+		bus/.style={line width=1.4pt},
+		tag/.style={font=\sffamily\scriptsize, inner sep=1.2pt},
+		tiny/.style={font=\sffamily\tiny, inner sep=1pt},
+		math/.style={font=\scriptsize, inner sep=1.2pt},
+		head/.style={font=\sffamily\scriptsize\bfseries},
+		brace/.style={decorate, decoration={brace, amplitude=3pt, mirror}, line width=0.6pt},
+		port/.style={circle, fill=black, minimum size=0.2cm, inner sep=0pt},
+		vport/.style={port},
+		plate/.style={fill=black, text=white, font=\sffamily\scriptsize\bfseries, inner sep=3pt},
+	]
+	\coordinate (yUpd) at (0,3.6);   \coordinate (yRen) at (0,2.9);
+	\coordinate (yEn)  at (0,10.0);  \coordinate (ySet) at (0,6.415);
+	\coordinate (yOut) at (0,10.3);   \coordinate (yIn)  at (0,7.3);
+	\foreach \i in {0,...,3}
+	\node[cell, pattern=north east lines] (c\i) at ({0.25+0.2*\i},11.0) {};
+	\foreach \i in {4,...,15}
+	\node[cell, fill=white] (c\i) at ({0.25+0.2*\i},11.0) {};
+	\node[port, color=cK] (pq) at (-1.55,11.0) {};
+	\node[tag, anchor=east, font=\ttfamily\scriptsize] at (pq.west) {q\_idx};
+	\draw[bus, draw=cK] (pq.east) -- (c0.west);
+	\draw[brace] ([yshift=-1pt]c0.south west) -- ([yshift=-1pt]c3.south east)
+		node[midway, below=3pt, tag, align=center] {\textbf{hi}\\[-2pt]$W{-}K$};
+	\draw[brace] ([yshift=-1pt]c4.south west) -- ([yshift=-1pt]c15.south east)
+		node[midway, below=3pt, tag, align=center] {\textbf{lo}\\[-2pt]body, $K$ bits};
+	\node[port] (pu) at (-1.55,8.6) {};
+	\node[tag, anchor=east, font=\ttfamily\scriptsize] at (pu.west) {q\_is\_update};
+	\node[port, color=cCt] (pv) at (-1.55,2.25) {};
+	\node[tag, anchor=east, font=\ttfamily\scriptsize] at (pv.west) {q\_valid};
+	\node[port, color=cK] (pd) at (-1.55,1.95) {};
+	\node[tag, anchor=east, font=\ttfamily\scriptsize] at (pd.west) {q\_data};
+	\draw[bus, draw=cHi] (0.25,11.54) |- (8.1,11.55);
+	\node[box, plug, minimum width=0.55cm, minimum height=0.42cm] (gbox) at (5.5,11.55) {$g$};
+	\node[math, anchor=south] at (gbox.north) {$c = g(\mathit{hi}) \in G$};
+	\draw[bus, draw=cLo] (c15.east) -- (8.1,11.0);
+	\fill[cLo] (3.6,11.0) circle (1.8pt);
+	\node[unit, plug, minimum width=2.9cm] (rk) at (5.45,9.92) {\textbf{rank detect}\\[1pt]$\rho(\mathit{lo})$};
+	\draw[bus, draw=cLo] (3.6,11.0) |- (rk.west);
+	\fill[cLo] (3.6,9.92) circle (1.8pt);
+	\draw[bus, draw=cLo] (rk.east) -- (8.1,9.92);
+	\node[op] (zc) at (4.23,9.1) {$=$};
+	\draw[bus, draw=cLo] (3.6,9.92) |- (4.0,9.25);
+	\node[port] (k0) at (0.25,8.95) {};
+	\fill[cHi] (0.25,11.55) circle (1.6pt);
+	\node[tag, font=\ttfamily\scriptsize, anchor=south] (node1) at (k0.north) {\#0};
+	\draw[w, draw=cK] (k0.east) -- (4,8.95);
+	\draw[w, draw=cLo] (zc.east) -- (8.1,9.1) node[pos=0.1, above, math] {$z$};
+	\fill[cLo] (5.0,9.1) circle (1.6pt);
+	\draw[w, draw=cCt] (pu.east) -- (8.1,8.6);
+	\fill[cCt] (7.15,8.6) circle (1.6pt);
+	\draw[bus, draw=cHi] (c0.north) |- (-0.15,11.55) -- (-0.15,11.1) arc (90:270:0.1) -- (-0.15,3.45) -- (1.4,3.45);
+	\fill[cHi] (1.4,3.45) circle (1.6pt);
+	\node[op] (aadd) at (2.6,4.05) {$+$};
+	\draw[gate] (2.272,4.05) circle (0.053);
+	\draw[bus, draw=cHi] (1.4,3.45) |- (2.219,4.05);
+	\node[math, above] at (1.9,4.05) {$\overline{\mathit{hi}}$};
+	\draw[w, draw=cLo] (5.0,9.1) -- (5.0,8.7) arc (90:270:0.1) -- (5.0,6.08) arc (90:270:0.1) -- (5.0,4.75) -| (aadd.north);
+	\node[mux, minimum width=0.9cm, minimum height=0.56cm] (amux) at (3.58,3.75) {};
+	\node[tiny] at (amux) {2:1};
+	\node[tiny, anchor=south] at (3.2,4.06) {1};
+	\node[tiny, anchor=north] at (3.2,3.44) {0};
+	\draw[w, draw=cHi] (aadd.east) -- (3.3,4.05);
+	\draw[w, draw=cHi] (1.4,3.45) -- (3.3,3.45);
+	\fill[cHi] (-0.15,5.98) circle (1.6pt);
+	\node[box, plug, minimum width=1.55cm, minimum height=0.6cm] (adec) at (5.6,3.75)
+	{\scriptsize root decoder\\[-2pt]\tiny lanes $\rightarrow$ $R$-bit mask};
+	\draw[bus, draw=cHi] (-0.15,5.98) -- (5.6,5.98) -- (adec.north);
+	\draw[w, draw=cHi] (amux.east) -- (adec.west);
+	\fill[cHi] (4.3,3.75) circle (1.6pt);
+	\node[tiny, above] at (4.28,3.77) {present};
+	\draw[gate] (7.35,3.88) -- (7.73,3.88) .. controls (7.88,3.88) and (7.99,3.77) .. (7.99,3.62) .. controls (7.99,3.48) and (7.88,3.36) .. (7.73,3.36) -- (7.35,3.36) -- cycle;
+	\draw[gate] (7.35,3.16) -- (7.73,3.16) .. controls (7.88,3.16) and (7.99,3.05) .. (7.99,2.9) .. controls (7.99,2.76) and (7.88,2.64) .. (7.73,2.64) -- (7.35,2.64) -- cycle;
+	\draw[gate] (7.285,2.77) circle (0.065);
+	\draw[w, draw=cHi] (adec.east) -- (7.05,3.75) -- (7.35,3.75);
+	\draw[w, draw=cHi] (4.3,3.75) |- (7.35,3.03);
+	\draw[w, draw=cCt] (7.15,8.6) -- (7.15,2.77) -- (7.22,2.77);
+	\fill[cCt] (7.15,3.49) circle (1.6pt);
+	\draw[w, draw=cCt] (7.15,3.49) -- (7.35,3.49);
+	\fill[cCt] (7.15,3.12) circle (1.6pt);
+	\draw[w, draw=cCt, arrows=-Stealth] (7.15,3.12) -- (3.58,3.12) -- (amux.south);
+	\draw[bus, draw=cHi] (7.99,3.62) -- (8.05,3.62) -- (8.05,3.6) -- (8.1,3.6);
+	\draw[bus, draw=cHi] (7.99,2.9) -- (8.1,2.9);
+	\draw[w, draw=cCt] (pv.east) -- (8.1,2.25);
+	\draw[bus, draw=cK] (pd.east) -- (8.1,1.95);
+	\foreach \y/\n in {11.55/{$W{-}K$}, 11.0/{$K$}, 1.95/32} {
+			\draw[w] (7,{\y-0.1}) -- (7.2,{\y+0.1});
+			\node[tiny, above] at (7.1,{\y+0.06}) {\n};
+		}
+	\foreach \y/\n in {3.6/{$R = B{-}1$}, 2.9/{$W{-}K$}} {
+			\draw[w] (9.22,{\y-0.1}) -- (9.38,{\y+0.1});
+			\node[tiny, below] at (9.3,{\y-0.08}) {\n};
+		}
+	\fill[white] (8.1,1.75) rectangle (8.7,12.46);
+	\fill[pattern=north east lines] (8.1,1.75) rectangle (8.7,12.46);
+	\draw[line width=1pt] (8.1,1.75) rectangle (8.7,12.46);
+	\node[rotate=90, fill=white, draw, inner sep=2pt, font=\sffamily\scriptsize\bfseries] at (8.4,6.9) {TAG REGISTER};
+	\fill[white] (-1.0,1.75) rectangle (-0.4,12.46);
+	\fill[pattern=north east lines] (-1.0,1.75) rectangle (-0.4,12.46);
+	\draw[line width=1pt] (-1.0,1.75) rectangle (-0.4,12.46);
+	\node[rotate=90, fill=white, draw, inner sep=2pt, font=\sffamily\scriptsize\bfseries, align=center] at (-0.7,6.9) {INPUT REGISTER};
+	\node[tiny, align=center, anchor=north] at (-0.7,1.72) {in the\\[-2pt]source};
+	\fill[black!12] (9.476,4.353) rectangle (18.026,12.353); \draw (9.476,4.353) rectangle (18.026,12.353);
+	\fill[dw] (9.301,4.177) rectangle (17.851,12.177); \draw (9.301,4.177) rectangle (17.851,12.177);
+	\node[draw, ip, line width=1pt, minimum width=8.55cm, minimum height=8.0cm] (lane) at (13.52,8) {};
+	\node[head, anchor=south] at (13.75,12.4) {$B$ PULL LANES};
+	% cycle bands between the registers (the datapath has four; this figure covers the first two)
+	\node[op] (sub) at (9.6,11.55) {$\circ$};
+	\node[math, anchor=west] at (9.95,11.6) {$l = c^{-1} \circ b$};
+	\draw[bus, draw=cHi] (8.7,11.55) -- (sub.west);
+	\draw[bus, draw=cLv] (sub.south) -- (9.6,5.85);
+	\node[math, anchor=west, rotate=90, text=black, ip] at (9.6,9.46) {$l$};
+	\foreach \y/\n in {11.0/{$\mathit{lo}$}, 9.92/{$\rho$}, 9.1/{$z$}, 8.6/{$u$}}
+	\node[math, above] at (8.98,\y) {\n};
+	\draw[bus, draw=cLo] (8.7,11.0) -- (10.65,11.0);
+	\fill[cLo] (9.3,11.0) circle (1.6pt);
+	\draw[w, draw=cLo] (9.3,11.0) -- (9.3,7.75) -- (14.05,7.75) -- (14.05,7.325) -- (14.6,7.325);
+	\node[tiny, above] at (14.38,7.325) {$\mathit{lo}_i$};
+	\node[tag, anchor=west, font=\sffamily\scriptsize\bfseries] at (13.3,11.6) {enable};
+	\node[mux, minimum width=0.75cm, minimum height=0.5cm] (mx) at (10.9,11.0) {};
+	\node[tiny] at (mx) {$K{:}1$};
+	\fill[cLv] (9.6,10.4) circle (1.6pt);
+	\draw[bus, draw=cLv] (9.6,10.4) -- (10.9,10.4) -- (10.9,10.66);
+	\node[draw, fill=white, circle, minimum size=0.66cm, inner sep=0pt] (c1) at (11.0,10.04) {$\lessgtr$};
+	\fill[cLv] (9.6,10.16) circle (1.6pt);
+	\draw[bus, draw=cLv] (9.61,10.16) -- (10.7,10.16);
+	\draw[bus, draw=cLo] (8.7,9.92) -- (10.693,9.92);
+	\node[tiny, above right] at (11.36,10.26) {$=$};
+	\node[tiny, right] at (11.36,9.9) {$>$};
+	\node[draw, fill=white, circle, minimum size=0.5cm, inner sep=0pt] (c2) at (11.0,8.2) {$<$};
+	\fill[cLv] (9.6,8.3) circle (1.6pt);
+	\draw[bus, draw=cLv] (9.6,8.3) -- (10.771,8.3);
+	\node[port, fill=cK] (pK) at (10,1.4) {};
+	\node[math, anchor=north west] at (pK.south west) {$K$};
+	\draw[bus, draw=cK] (pK.north) -- (9.97,8.1) -- (10.771,8.1);
+	\draw[gate] (13.4,11.125) -- (13.75,11.125) .. controls (13.888,11.125) and (14.0,11.013) .. (14.0,10.875) .. controls (14.0,10.737) and (13.888,10.625) .. (13.75,10.625) -- (13.4,10.625) -- cycle;
+	\draw[gate] (13.335,10.75) circle (0.065);
+	\draw[gate] (13.4,10.15) -- (13.75,10.15) .. controls (13.888,10.15) and (14.0,10.038) .. (14.0,9.9) .. controls (14.0,9.762) and (13.888,9.65) .. (13.75,9.65) -- (13.4,9.65) -- cycle;
+	\draw[gate] (13.335,10.025) circle (0.065);
+	\draw[gate] (14.6,9.94) .. controls (14.89,9.94) and (15.12,9.79) .. (15.25,9.69) .. controls (15.12,9.59) and (14.89,9.44) .. (14.6,9.44) .. controls (14.74,9.59) and (14.74,9.79) .. cycle;
+	\draw[gate] (15.55,9.7) -- (15.85,9.7) .. controls (16.126,9.7) and (16.35,9.476) .. (16.35,9.2) .. controls (16.35,8.924) and (16.126,8.7) .. (15.85,8.7) -- (15.55,8.7) -- cycle;
+	\draw[gate] (15.485,9.075) circle (0.065);
+	\draw[gate] (16.6,10.3) .. controls (16.87,10.3) and (17.08,10.12) .. (17.2,10.0) .. controls (17.08,9.88) and (16.87,9.7) .. (16.6,9.7) .. controls (16.732,9.88) and (16.732,10.12) .. cycle;
+	\node[tiny, above] at (13.67,10.79) {query};
+	\node[tiny, above] at (15.95,9.1) {update};
+	\draw[w, draw=cCt] (11.15,11.0) -- (13.4,11.0);
+	\node[math, above] at (11.55,11.0) {$\mathit{has}$};
+	\fill[cCt] (12.0,11.0) circle (1.6pt);
+	\draw[w, draw=cCt] (12.0,11.0) -- (12.0,10.025) -- (13.27,10.025);
+	\draw[w, draw=cCt] (8.7,8.6) -- (12.5,8.6);
+	\fill[cCt] (12.5,8.6) circle (1.6pt);
+	\draw[w, draw=cCt] (12.5,10.75) -- (12.5,6.0);
+	\draw[w, draw=cCt] (12.5,10.75) -- (13.27,10.75);
+	\fill[cCt] (12.5,9.325) circle (1.6pt);
+	\draw[w, draw=cCt] (12.5,9.325) -- (15.55,9.325);
+	\draw[w, draw=cLo] (8.7,9.08) -- (15.42,9.07);
+	\draw[w, draw=cCt] (11.262,10.24) -- (12.25,10.24) -- (12.25,9.575) -- (14.67,9.575);
+	\draw[w, draw=cCt] (11.33,10.03) -- (11.8,10.03) -- (11.8,9.77) -- (13.4,9.77);
+	\draw[w, draw=cCt] (14.0,9.9) -- (14.3,9.9) -- (14.3,9.825) -- (14.67,9.825);
+	\draw[w, draw=cCt] (15.25,9.7) -- (15.4,9.7) -- (15.4,9.575) -- (15.55,9.575);
+	\draw[w, draw=cCt] (11.25,8.2) -- (15.4,8.2) -- (15.4,8.825) -- (15.55,8.825);
+	\draw[w, draw=cCt] (14.0,10.875) -- (16.42,10.875) -- (16.42,10.15) -- (16.67,10.15);
+	\draw[w, draw=cCt] (16.35,9.2) -- (16.5,9.2) -- (16.5,9.85) -- (16.67,9.85);
+	\foreach \y/\s in {7.3/{$\ge$}, 6.65/{$>$}, 5.75/{$=$}} {
+			\node[draw, fill=white, circle, minimum size=0.5cm, inner sep=0pt] at (11.0,\y) {\s};
+			\fill[cLv] (9.6,{\y+0.1}) circle (1.6pt);
+			\draw[bus, -, draw=cLv] (9.6,{\y+0.1}) -- (10.771,{\y+0.1});
+			\fill[cK] (10.33,{\y-0.1}) circle (1.6pt);
+			\draw[bus, -, draw=cK] (10.33,{\y-0.1}) -- (10.771,{\y-0.1});
+		}
+	\node[vport, fill=cK] (pI) at (10.33,1.4) {};
+	\node[math, below] at (pI.south) {$i$};
+	\draw[bus, draw=cK] (10.33, 1.5) -- (10.33,7.2);
+	\node[mux, minimum width=26pt] (m2) at (13.15,6.975) {};
+	\node[tiny] at (m2) {2:1};
+	\draw[w, draw=cLv] (11.25,7.3)  -- (12.89,7.3);
+	\draw[w, draw=cLv] (11.25,6.64) -- (12.89,6.64);
+	\fill[cCt] (12.5,6.29) circle (1.6pt);
+	\draw[w, draw=cCt] (12.5,6.29) -- (13.15,6.29) -- (13.15,6.6);
+	\fill[black!12] (14.387,5.506) rectangle (17.337,7.806); \draw (14.387,5.506) rectangle (17.337,7.806);
+	\fill[dw] (14.281,5.4) rectangle (17.231,7.7);     \draw (14.281,5.4) rectangle (17.231,7.7);
+	\node[draw, fill=white, line width=0.8pt, minimum width=2.95cm, minimum height=2.3cm] (slice) at (15.65,6.55) {};
+	\node[tiny, anchor=north east] at ([xshift=-2pt, yshift=-2pt]slice.north east) {bit slice $i$, $\times K$};
+	\draw[gate] (14.6,7.45) -- (14.95,7.45) .. controls (15.088,7.45) and (15.2,7.338) .. (15.2,7.2) .. controls (15.2,7.062) and (15.088,6.95) .. (14.95,6.95) -- (14.6,6.95) -- cycle;
+	\draw[gate] (14.6,6.125) -- (14.95,6.125) .. controls (15.088,6.125) and (15.2,6.013) .. (15.2,5.875) .. controls (15.2,5.737) and (15.088,5.625) .. (14.95,5.625) -- (14.6,5.625) -- cycle;
+	\draw[gate] (15.5,6.79) .. controls (15.792,6.79) and (16.02,6.64) .. (16.15,6.54) .. controls (16.02,6.44) and (15.792,6.29) .. (15.5,6.29) .. controls (15.643,6.44) and (15.643,6.64) .. cycle;
+	\draw[gate] (16.4,6.665) -- (16.75,6.665) .. controls (16.888,6.665) and (17.0,6.553) .. (17.0,6.415) .. controls (17.0,6.277) and (16.888,6.165) .. (16.75,6.165) -- (16.4,6.165) -- cycle;
+	\draw[w, draw=cLv] (13.41,7) -- (14.1,7) -- (14.1,7.1) -- (14.6,7.1);
+	\node[math, above] at (13.7,6.975) {$m_i$};
+	\draw[w, draw=cCt] (12.5,6.0) -- (14.6,6.0);
+	\draw[w, draw=cLv] (11.25,5.75) -- (14.6,5.75);
+	\node[math, below] at (12.9,5.75) {$e_i$};
+	\draw[w, draw=cLo] (15.2,7.2) -- (15.35,7.2) -- (15.35,6.665) -- (15.57,6.665);
+	\draw[w, draw=cLo] (15.2,5.875) -- (15.35,5.875) -- (15.35,6.415) -- (15.57,6.415);
+	\draw[w, draw=cLo] (16.15,6.54) -- (16.4,6.54);
+	\fill[cCt] (17.5,10.0) circle (1.6pt);
+	\draw[w, draw=cCt, arrows=-Stealth] (17.5,10.0) -- (17.5,5.2) -- (16,5.19) -- (16,6.29) -- (16.4,6.29);
+	\node[math, below, fill=white] at (16.92,5.11) {en};
+	\fill[black!12] (19.582,6.332) rectangle (21.782,11.132); \draw (19.582,6.332) rectangle (21.782,11.132);
+	\fill[dw] (19.441,6.191) rectangle (21.641,10.991); \draw (19.441,6.191) rectangle (21.641,10.991);
+	\node[tiny, anchor=south] at (20.68,11.15) {$B$ banks};
+	\node[draw, fill=white, line width=1pt, minimum width=2.2cm, minimum height=4.8cm] (bram) at (20.4,8.45) {};
+	\node[align=center] at (20.4,8.45) {\textbf{bank $b$}\\[1pt]block RAM\\[1pt]{\scriptsize $2^K \times 32$}};
+	\node[tiny, anchor=west] at (bram.west |- yEn) {EN};
+	\node[tiny, anchor=west] at (bram.west |- ySet) {ADDR};
+	\node[tiny, anchor=east] at (bram.east |- yOut) {DOUT};
+	\node[tiny, anchor=east] at (bram.east |- yIn) {DIN};
+	\coordinate (yWa) at (0,6.8);
+	\node[tiny, anchor=east] at (bram.east |- yWa) {WA, WE};
+	\node[draw, fill=white, line width=1pt, minimum width=56.0017511pt, minimum height=41.2410578pt] (roots) at (16.76,3.2) {};
+	\node[tiny, anchor=north, node font=\scriptsize\sffamily] at (roots.north) {$R$ root registers};
+	\foreach \k in {0,...,4} \foreach \r in {0,1,2}
+	\draw[fill=white, postaction={pattern=north east lines}] ({16+0.32*\k},{2.7+0.2*\r}) rectangle ++(0.28,0.16);
+	\draw[w, draw=cCt] (17.2,10.0) -- (bram.west |- yEn);
+	\draw[bus, draw=cLo] (17.23,6.41) -- (17.4,6.415) arc (180:0:0.1) -- (19.1,6.415);
+
+	\draw[w, draw=cCt] (8.7,2.25) -- (29.55,2.25);
+	\draw[bus, draw=cK] (8.7,1.95) -- (25.0,1.95) -- (25.0,7.75);
+	\fill[cK] (23.4,1.94) circle (1.8pt);
+	\draw[bus, draw=cK] (23.4,2) -- (23.4,4.75);
+	\node[math, right] at (25.0,3.9) {$\Delta_3$};
+	% s3: the read address, captured at the issue edge
+	\fill[cLo] (19.05,6.415) circle (1.6pt);
+	\draw[w, draw=cLo] (19.05,6.415) -- (19.05,5.4) -- (22.2,5.4);
+	\fill[cLo] (22,5.4) circle (1.6pt);
+	\draw[w, draw=cLo] (22,5.4) -- (22,7.3) -- (23.93,7.3) -- (23.93,6.85);
+	\fill[cLo] (22.6,7.3) circle (1.6pt);
+	\draw[w, draw=cLo] (22.6,7.3) -- (22.6,6.85);
+	\node[math, below] at (20.4,5.39) {$s_3$};
+	% pending writes: the two updates still in flight (registers)
+	\node[draw, fill=white, postaction={pattern=north east lines}, minimum width=2.0cm, minimum height=1.0cm, pattern=north east lines, pattern color=black] (pend) at (23.22,5.26) {};
+	\node[fill=white, draw, inner sep=1.5pt, align=center, font=\sffamily\tiny] at (pend) {pending writes\\[-1pt]$s_4\,\Delta_4$ $\cdot$  $s_5\,\Delta_5$};
+	% hazard detection: read address against each pending write address
+	\node[draw, fill=white, circle, minimum size=0.5cm, inner sep=0pt] (hA) at (22.6,6.6) {$=$};
+	\node[draw, fill=white, circle, minimum size=0.5cm, inner sep=0pt] (hB) at (23.9,6.6) {$=$};
+	\draw[w, draw=red!81!cyan!64] (22.6,5.76) -- (hA.south) node[pos=0.4, left, math] {$s_4$};
+	\draw[w, draw=red!81!cyan!64] (23.9,5.76) -- (hB.south) node[pos=0.4, right, math] {$s_5$};
+	\draw[w, red!81!cyan!64] (hA.east) -- (23.05,6.6) -- (23.05,7.75);
+	\draw[w, red!81!cyan!64] (hB.east) -- (24.4,6.6) -- (24.4,7.75);
+	\node[math, right] at (23.05,7.05) {$h_1$};
+	\node[math, right] at (24.4,7.05) {$h_2$};
+	\draw[bus, red!81!cyan!64] (23.4,5.76) -- (23.4,7.8);
+	\node[font=\tiny, inner sep=1pt, anchor=west] at (23.46,7.5) {$\Delta_4,\Delta_5$};
+	% merge (structure-specific): the new value of an updated node
+	\node[plug, minimum width=2.8cm, minimum height=0.9cm] (mA) at (23.8,8.2) {\scriptsize merge\\[-2pt]{\tiny $x = \Delta_3 + h_1\Delta_4 + h_2\Delta_5$}};
+	\node[plug, minimum width=1.8cm, minimum height=0.9cm] (mB) at (28.0,8.2) {\scriptsize merge\\[-2pt]{\tiny $q + x$}};
+	\draw[bus, draw=cK] (25.2,8.4) -- (27.1,8.4);
+	\node[math, above] at (25.5,8.4) {$x$};
+	% reduce (structure-specific): the query result
+	\node[plug, minimum width=2.2cm, minimum height=0.8cm] (rA) at (23.8,10.3) {\scriptsize reduce\\[-2pt]{\tiny partial sums}};
+	\node[plug, minimum width=1.8cm, minimum height=0.8cm] (rB) at (28.0,10.3) {\scriptsize reduce\\[-2pt]{\tiny $\Sigma$ + roots + corr}};
+	\draw[bus, draw=cLo] (24.9,10.45) -- (27.1,10.45);
+	\draw[bus, draw=cK] (25.2,7.95) -- (25.6,7.95) -- (25.6,9.75) -- (27.8,9.75) -- (27.8,9.9);
+	\node[math, above] at (25.82,9.84) {corr};
+	% read data q
+	\draw[bus, draw=cLo] (bram.east |- yOut) -- (22.7,10.3);
+	\fill[cLo] (22.1,10.3) circle (1.6pt);
+	\draw[bus, draw=cLo] (22.1,10.3) -- (22.1,9.3) -- (27.5,9.3) -- (27.5,8.65);
+	\node[math, above] at (22.4,10.3) {$q$};
+	% roots read for queries
+	\draw[bus, draw=cHi] (17.74,3.2) -- (26.95,3.2) -- (26.95,10.15) -- (27.1,10.15);
+	\node[tag, above, fill=white] at (21,3.25) {roots (query)};
+	% write-back: merged value and address return to the bank
+	\draw[bus, draw=cLo, ->] (28.9,8.2) -- (29.25,8.2) -- (29.25,4.3) -- (21.8,4.35) |- (bram.east |- yIn);
+	\node[tag, above, fill=white] at (27.89,4.36) {write-back};
+	\draw[w, draw=cLo, ->] (22.22,5) -- (21.94,5) |- (bram.east |- yWa);
+	% outputs
+	\draw[bus, draw=cLo] (28.9,10.3) -- (29.55,10.3);
+	\node[port] at (29.6,10.3) {};
+	\node[tag, anchor=west, align=left] at (29.7,10.3) {result\\[-2pt]{\tiny to the FIFO}};
+	\node[port] at (29.6,2.25) {};
+	\node[tag, anchor=west, align=left] at (29.7,2.25) {\texttt{valid}\\[-2pt]{\tiny to the FIFO}};
+	% the read register at the end of cycle 3
+	\fill[white] (26.2,1.75) rectangle (26.8,12.46);
+	\fill[pattern=north east lines] (26.2,1.75) rectangle (26.8,12.46);
+	\draw[line width=1pt] (26.2,1.75) rectangle (26.8,12.46);
+	\node[rotate=90, fill=white, draw, inner sep=2pt, font=\sffamily\scriptsize\bfseries] at (26.5,6.9) {READ REGISTER};
+	\node[tiny, align=center, anchor=north] at (26.5,1.72) {$q$, $x$, corr,\\[-2pt]partial sums};
+	\fill[white] (18.3,1.75) rectangle (18.9,12.46);
+	\fill[pattern=north east lines] (18.3,1.75) rectangle (18.9,12.46);
+	\draw[line width=1pt] (18.3,1.75) rectangle (18.9,12.46);
+	\node[rotate=90, fill=white, draw, inner sep=2pt, font=\sffamily\scriptsize\bfseries] at (18.6,6.9) {ISSUE REGISTER};
+	\node[tiny, align=center, anchor=north] at (18.6,1.72) {BRAM address,\\[-2pt]datapath flops};
+	\draw[w] (17.85,6.315) -- (18.01,6.515);
+	\node[tiny, below, fill=white] at (17.94,6.32) {$K$};
+	\draw[bus, draw=cHi] (8.7,3.56) -- (15.6,3.56) node[pos=0.656546, above=1pt, tag, fill=white] {update: add $\Delta$ at each anchor-lane root};
+	\draw[bus, draw=cHi] (8.7,2.89) -- (15.6,2.89) node[pos=0.6, above, tag, fill=white] {query: read one root per anchor lane};
+	\node[draw, fill=white, postaction={pattern=north east lines}, minimum width=0.35cm, minimum height=0.25cm] (lg4) at (20.0,1.35) {};
+	\node[tiny, anchor=west] at (lg4.east) {register};
+	\node[plug, minimum width=0.35cm, minimum height=0.25cm, inner sep=0pt] (lg6) at (20.01,0.5) {};
+	\node[tiny, anchor=west] at ([xshift=0.06cm]lg6.east) {structure-specific (here Fenwick)};
+	\node[port] (lg5) at (20.0,0.95) {};
+	\node[tiny, anchor=west] at ([xshift=0.08cm]lg5.east) {terminal};
+	\foreach \c/\t [count=\n from 0] in {cCt/control, cLo/body, cHi/anchor, cLv/level, cK/{constant, data }, cF/forwarding }
+	\draw[line width=1.4pt, \c] (16.3,{1.45-0.25*\n}) -- (16.75,{1.45-0.25*\n}) node[tiny, black, anchor=west] {\t};
+	\node[draw, shape=rectangle, minimum width=0.1cm, minimum height=0.28cm, fill, pattern=dots, pattern color=black] at (15.68,3.54) {};\node[draw, shape=rectangle, minimum width=0.1cm, minimum height=0.28cm, fill, pattern=dots, pattern color=black] at (19.2,6.4) {};
+	\node[draw, shape=rectangle, minimum width=0.1cm, minimum height=0.28cm, fill, pattern=dots, pattern color=black] at (15.68,2.94) {};
+\end{tikzpicture}
+\end{document}
