@@ -1,0 +1,159 @@
+\section{Background and Motivation}\label{sec:motivation}
+
+This section addresses three major themes:
+\emph{the necessity of placing nodes over multiple banks}
+(Section~\ref{sec:mot_banks}), \emph{the requirement of a pipelined read-write
+	system capable of handling data hazards gracefully} (Section~\ref{sec:mot_rw}),
+and \emph{desirable properties of a placement function}
+(Section~\ref{sec:mot_conflict}).
+
+\subsection{A Review of Replication, Multi-Port Banks and Placement}\label{sec:mot_banks}
+
+The requirement of reading many nodes in parallel can be met in three ways:
+replicating the data structure over several banks, building banks with many
+read and write ports, and placing the nodes across many single-port banks with
+a dedicated placement function.
+
+\paragraph{Replication} Replicating the structure is naturally conflict-free,
+offering maximum parallelism at the cost of storage. A conflict-free traversal
+that reads $d$ nodes at once needs $d$ copies, so a tree of $S$ bytes occupies
+$S \cdot d$ bytes of on-chip memory, and every update must write all $d$
+copies, so the write traffic grows with $d$. As a result, dense trees quickly
+become infeasible.
+
+\paragraph{Multi-port RAMs} Multi-port RAMs with 4, 8 or 16 read and write
+ports could, in principle, sustain the bandwidth a traversal requires, provided
+the number of ports $N$ is at least the number of nodes a traversal reads,
+$N \ge d$. In a custom array, every port adds its own wordline and bitlines to
+every cell, so the cell area rises roughly with the square of the number of
+ports, and the longer, more heavily loaded lines raise access delay and
+switching power with it~\cite{rixner2000}. An FPGA offers no such cells: its
+block RAMs have two ports~\cite{ref2,ref30}, and more must be composed from
+them, by multipumping at a multiple of the system clock, or by replication
+steered by a live-value table, which builds $W$ write ports and $R$ read ports
+from $W \cdot R$ replicas of the storage~\cite{laforest2010,laforest2014}, or
+by XOR codes, which need $W(W - 1 + R)$ replicas~\cite{laforest2012}; later
+refinements reduce the steering logic without changing the
+replication~\cite{abdelhadi2014}. A tree traversal sits at the expensive end of
+every one of these curves, because its writes are as wide as its reads.
+
+\paragraph{Placement} Placing nodes into banks takes a different approach
+altogether. A placement function $\operatorname{bank}(x)$ assigns each node $x$
+to one of $B$ single-port banks, so that the tree is stored exactly once and
+the nodes of every traversal land in distinct
+banks~\cite{das2000mappings,zhou2017new}. For
+a traversal to be conflict-free, $B$ must be at least the number of nodes it
+reads from the banks, $B \ge d$, so the number of banks still grows with the
+depth of the tree; but the storage stays at one copy, and each bank keeps a
+single port, however deep the tree becomes. This is the approach we take.
+Existing placements, however, keep either conflict freedom or balance, not both. Address
+hashing~\cite{rau1991pseudorandomly,vandenbraak2016configurable} balances
+capacity across banks, but it distributes addresses rather than separating the
+ones a traversal requests together, so traversals still collide;
+colouring~\cite{das2000mappings} separates co-accessed nodes by construction,
+but gives up balance. Dynamic load-store queues and out-of-order
+arbiters~\cite{josipovic2017outoforder} resolve conflicts at run time, at an
+area and frequency cost~\cite{szafarczyk2023compiler} that is warranted for
+unpredictable access, but not for a traversal whose access set is a function of
+its index.
+
+\input{rw_throughput_fig}
+\subsection{Pipelined Reads, Writes and Their Hazards}\label{sec:mot_rw}
+
+A tough problem to engineer systems around is one in which several reads and
+writes are in flight at once, all destined for the same nodes. An event in an
+order book, for example, changes a price level and is followed by a query about
+the book's depth, so reads and writes arrive in equal numbers.
+
+Fig.~\ref{fig:rw_throughput} quantifies what this costs a pipeline that could
+issue one operation every cycle. Here, every subsequent operation in need of an
+unfinished write must stall until the write is complete. The trace is NASDAQ
+ITCH order flow for eight symbols: 3.6 million order-book updates, each
+followed by a depth query at the best price of the side just updated. On it,
+the stalling pipeline needs 1.33 cycles per operation across the eight
+interleaved symbols, and 1.41 when it serves the book of the busiest symbol,
+QQQ, alone, because a single book crowds its updates onto one price ladder.
+
+A system that is to keep pace with such a workload must therefore accept a
+read and a write in the same stream every cycle, and \emph{handle hazards
+	gracefully}: neither padded with no-op bubbles nor fraught with stalls, which
+here cost 33\% to 41\% more cycles per operation.
+
+\input{conflict_heatmaps}
+\subsection{Desirable Properties of Placement Functions}\label{sec:mot_conflict}
+
+What makes a placement good comes down to two properties: \emph{conflict
+	freedom} and \emph{balance}.
+
+\subsubsection{Conflict Freedom}
+
+An operation on a tree reads a fixed set of nodes together, its
+\emph{template}~\cite{das2000mappings}, whose size is the $d$ of
+Section~\ref{sec:mot_banks}; here, a leaf-to-root path, as it arises in
+Fenwick trees, segment trees and succinct tries. Two nodes of one template
+that share a bank are in \emph{conflict}, and one must wait for a later cycle;
+a placement is conflict-free when every template lies in distinct banks, so
+that all its nodes can be read in the same cycle.
+
+To see how much this matters in practice, we ran queries on a dense Fenwick
+tree with 16-bit keys through the PULP TCDM
+interconnect~\cite{pulp_tcdm,pulp_cluster_interconnect}. It is a full crossbar
+that resolves conflicts at run time, with a round-robin arbiter in front of
+each of sixteen one-cycle banks. We placed the tree by XOR folding, a linear
+form of address hashing that balances the banks but does not keep a template
+apart (cf.~Theorem~\ref{thm:linear}). Each query presents all of its nodes at
+once, one per request port, and its latency runs from its arrival to its last
+response, counted through the front end and the adder tree, so that a query
+that meets no conflict takes four cycles. We swept the offered load from 0.01
+to 1.00 queries per cycle and drew, at six loads, the share of queries slower
+than each latency (Fig.~\ref{fig:conflict_ccdf}(a)), and the median latency at
+every load (Fig.~\ref{fig:conflict_ccdf}(b)).
+
+The latency divides into two regions at a knee
+(Fig.~\ref{fig:conflict_ccdf}(b)), at a load of 0.865 queries per cycle. Below
+the knee, the bulk of the queries finishes within a few cycles, with a short
+and thin tail; at a load of 0.2, the slowest query in a thousand takes
+7 cycles. Approaching the knee, the tail lengthens and fattens together: the
+99.9th percentile rises sixfold between loads of 0.80 and 0.86, from 19 cycles
+to 122.
+
+Beyond the knee, the distribution no longer has a tail in the usual sense: it
+has moved as a whole. The queue never drains, so the median itself climbs, to
+	5{,}273 cycles at full load, and fewer than one query in a thousand finishes in
+the pipeline's four cycles. A placement that balances the banks but lets
+templates collide thus caps throughput well short of one query per cycle.
+
+\subsubsection{Balance}
+Balance has two senses. \emph{Capacity} balance is how many nodes each bank
+holds: it belongs to the placement alone, is fixed when the tree is laid out,
+and decides how large every bank must be built, since all are sized for the
+fullest. \emph{Access} balance is how often each bank is touched: it depends on
+the workload as well, and decides how hard each bank works.
+
+Jiang et al.~\cite{jiang2026scamp} make the cost of capacity imbalance precise
+for IPv6 lookup pipelines, the design now standard in routing ASICs and
+RMT-style programmable switches: for a fixed memory budget $C$ and a per-entry
+cost $\eta_{\mathrm{pp}}$, the number of entries a pipeline can hold is
+$$
+	N_{\mathrm{max}} = \frac{\eta_{\mathrm{util}} \cdot C}{\eta_{\mathrm{pp}}}.
+$$
+When every bank is provisioned for the fullest one, the utilisation is set by
+the placement alone,
+$$
+	\eta_{\mathrm{util}} = \frac{\sum_b n_b}{B \cdot \max_b n_b},
+$$
+where $n_b$ is the number of nodes in bank $b$, so $N_{\mathrm{max}}$ falls in
+direct proportion to the share of the fullest bank. Placing the 16-bit Fenwick
+tree by level fills one bank with half of its nodes, so
+$\eta_{\mathrm{util}} = 0.125$, and the same memory holds one eighth of the
+entries an exactly balanced placement would; trace-derived
+colouring~\cite{zhou2017new} sizes every bank for its heaviest load of 50,800
+nodes, for $\eta_{\mathrm{util}} = 0.081$. Sparse structures inherit the
+problem from their keys: in a forest of dense subtrees whose live subtrees
+follow the pages of a real allocator trace (\texttt{git}), banking each subtree
+by the low bits of its address reaches only $\eta_{\mathrm{util}} = 0.69$.
+
+Access imbalance costs differently. Behind a cache, a bank asked to serve more
+of the nodes a workload reads than its share evicts more of them, so access
+imbalance turns into evictions; Section~\ref{sec:eval_c2} measures this on the
+succinct tries of C$^2$~\cite{zhang2027c2}.

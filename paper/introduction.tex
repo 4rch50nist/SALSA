@@ -1,0 +1,49 @@
+\section{Introduction}\label{sec:intro}
+
+The end of Dennard scaling has moved performance gains toward domain-specific
+co-design, in which memory hierarchies and pipelines are shaped around the
+access patterns of their workload~\cite{hennessy2019new}.
+In data-centric accelerators the binding cost is rarely arithmetic; it is the
+delay and energy of moving data~\cite{PECCERILLO2022102561}. On FPGAs this cost
+is concentrated in on-chip memory (OCM) bandwidth~\cite{fpganearmemory2021}.
+
+Tree structures, due to their simplicity, sit on the
+critical path of real systems. For example, trees in order
+books~\cite{boutros2017build} must reflect every market event before
+the next one arrives; tries in a router must sustain prefix
+operations for every packet at line rate~\cite{jiang2026scamp};
+heaps in reinforcement-learning agents with prioritised
+replay~\cite{schaul2016per} must facilitate
+sampling and reprioritisation of their memory on every training step.
+As such, tree traversals are \emph{memory bound}: they touch $O(\log N)$ nodes
+per operation, and the arithmetic at each node is trivial.
+
+SALSA starts from an observation about these traversals: along every one of
+them, some coordinate of the node changes at every step. We call it the
+\emph{rank}; it is the level of a Fenwick node~\cite{fenwick1994},
+and depth in a heap or trie. Placing each node by its rank therefore keeps a traversal in distinct
+banks by construction. No linear bank function can do the same: it maps two
+nodes to one bank exactly when their difference lies in its kernel,
+so every one of them with fewer than $2^{K-1}$ banks puts two nodes of some
+path together (Theorem~\ref{thm:linear}).
+Rank alone, however, inherits the imbalance of
+colouring~\cite{das2000mappings}, so SALSA rotates the
+ranks of each subtree by an offset $g$. The result is a \emph{regular} group
+action on the banks: the rank, when injective along each traversal, gives
+\emph{conflict freedom}, and the rotation, when a bijection, gives exact
+\emph{balance}.
+
+% TODO(contributions): write after evaluation. Current draft claims:
+%  1. Conflict-free templates with B >= K banks; linear XOR needs 2^{K-1} (Thm 5).
+%  2. Exact balance when every anchor holds every body (Thm 2); closed-form RMS
+%     imbalance for independent non-uniform workloads via Fourier (Thm 3).
+%  3. Guarantees survive caching with no extra hardware (Thm 4).
+%  Lead with whichever the evaluation makes most striking.
+The rest of the paper is organised as follows. Section~\ref{sec:motivation}
+reviews the ways a traversal can read many nodes at once and measures what
+hazards, conflicts and imbalance cost. Section~\ref{sec:theory} derives the
+placement and its guarantees, Section~\ref{sec:architecture} builds the
+pipeline that realises it, and Section~\ref{sec:evaluation} evaluates it on the
+board and on the three workloads. Section~\ref{sec:discussion} sets out where
+the approach applies and where it goes next, and Section~\ref{sec:conclusion}
+concludes.

@@ -1,0 +1,133 @@
+% Figures: cayley_fig.tex (the action on the cube and the cycle), placement.tex (four trees).
+% Needs in the preamble: \newtheorem{theorem}{Theorem} and \newtheorem{corollary}{Corollary}.
+
+\input{cayley_fig}
+\section{Theory}\label{sec:theory}
+
+\paragraph{\underline{Setup}}
+A request carries a $W$-bit key $x$, which we split into its \emph{anchor} $hi$, the top
+$W - K$ bits, and its \emph{body} $lo$, the low $K$ bits, so that $x = 2^K \cdot hi + lo$. Our split fixes two limits of Das and Pinotti~\cite{das2000mappings}, whose colours a tree
+of height $h$ whole: its $h + 1$ modules grow with the tree, and its balance holds only
+within a constant factor.
+
+The $B = 2^b$ banks are the elements of an abelian group $(G, \circ)$ of order $B$, with
+Cayley graph $\Gamma$. A template reads at most $K$ banked nodes, one per level of the
+body, so we take $B \ge K$ throughout. Each $c \in G$ acts on $G$ by
+$\phi_c(r) = c \circ r$. This action is
+\emph{regular}:
+\begin{enumerate}
+	\item[\textbf{(P1)}] $\forall c \in G:\ \phi_c \in \mathrm{Sym}(G)$, with $\phi_c^{-1} = \phi_{c^{-1}}$;
+	\item[\textbf{(P2)}] $\forall r, t \in G\ \ \exists!\, c \in G:\ \phi_c(r) = t$, namely $c = t \circ r^{-1}$.
+\end{enumerate}
+Two groups have direct hardware implementations, drawn as Cayley graphs in
+Fig.~\ref{fig:cayley}: (i)~$(\mathbb{F}_2^{\,b}, \oplus)$, with $\phi_c(r) = c \oplus r$, a
+hypercube $Q_b$ realised as $b$ XOR gates; and (ii)~$(\mathbb{Z}_B, +)$, with
+$\phi_c(r) = c + r \bmod B$, a cycle $C_B$ realised as a $b$-bit adder.
+
+\paragraph{\underline{Placement}}
+A placement is given by two maps: a \emph{rank} $\rho$ from the nonzero bodies to $G$, and
+a \emph{rotation} $g$ from the anchors to $G$. A node with $lo \ne 0$ is stored at address
+$lo$ in bank
+$$
+	\mathrm{bank}(x) = \phi_{g(hi)}\bigl(\rho(lo)\bigr) = g(hi) \circ \rho(lo),
+$$
+and a node with $lo = 0$ is held in a register. We require \textbf{(P3)}~$\rho$ injective on every
+template, and \textbf{(P4)}~$g$ a bijection, which needs exactly $B$ anchors, $W - K = b$. The rank
+is whatever changes at every step of a template: the level $v_2(lo)$ for a Fenwick tree,
+the depth for a heap or a trie.
+
+\begin{theorem}[Conflict freedom]\label{thm:conflict}
+	If $\rho$ is injective on every template, the banked nodes of every template lie in
+	distinct banks.
+\end{theorem}
+
+\begin{proof}
+	The banked nodes of a template share one anchor, so all are placed by the same bijection
+	$\phi_{g(hi)}$, and their ranks are distinct.
+\end{proof}
+
+\paragraph{\underline{Balance}}
+Let $\mu, \nu : G \to [0,1]$ be the distributions of $g(hi)$ and $\rho(lo)$ over the
+banked nodes; they may model workload accesses or the storage of sparse and compacted
+structures. Assuming independence,\footnote{This fails for coupled datasets, treated in later sections.} bank $t$ receives the fraction
+$p(t) = (\mu \ast \nu)(t) = \sum_{c \in G} \mu(c)\,\nu(c^{-1} \circ t)$ of banked nodes,
+with RMS imbalance
+$\varepsilon_p = \sqrt{\frac{1}{B}\sum_t \bigl(B\,p(t) - 1\bigr)^2}$. To make
+analysis easier, we introduce the Fourier
+transform $\hat\mu(k) = \sum_{t} \mu(t)\,\overline{\chi_k(t)}$, with $\chi_k$ ranging over
+the characters of $G$, turning this convolution into the product
+$\hat p(k) = \hat\mu(k)\,\hat\nu(k)$. On $\mathbb{F}_2^{\,b}$ it is the Walsh--Hadamard
+transform, $\chi_k(t) = (-1)^{k \cdot t}$; on $\mathbb{Z}_B$ it is the DFT,
+$\chi_k(t) = e^{2\pi i k t/B}$.
+
+\begin{theorem}[Balance]\label{thm:balance}
+	If $g(hi)$ and $\rho(lo)$ are independent, then
+	$\varepsilon_p = \sqrt{\sum_{k \neq 0} |\hat\mu(k)|^2\,|\hat\nu(k)|^2}$.
+\end{theorem}
+
+\begin{proof}
+	Let $f(t) = B\,p(t) - 1$. Then
+	$$
+		\begin{aligned}
+			\varepsilon_p^2
+			 & = \frac{1}{B}\sum_t |f(t)|^2
+			\overset{(a)}{=} \frac{1}{B^2}\sum_k |\hat f(k)|^2 \\
+			 & \overset{(b)}{=} \sum_{k \neq 0} |\hat p(k)|^2
+			\overset{(c)}{=} \sum_{k \neq 0} |\hat\mu(k)|^2\,|\hat\nu(k)|^2 ,
+		\end{aligned}
+	$$
+	where (a) is Parseval's identity; (b) holds because, by linearity,
+	$\hat f(k) = B\,\hat p(k) - \hat 1(k)$, and $\hat 1(k) = \sum_t \overline{\chi_k(t)}$ is
+	$B$ at $k = 0$ and $0$ otherwise, so $\hat f(0) = B(\hat p(0) - 1) = 0$; and (c) is the
+	product rule.
+\end{proof}
+
+Imbalance thus survives at a frequency only if both $g(hi)$ and $\rho(lo)$ are uneven
+there; making either one uniform removes it entirely.
+
+\begin{corollary}[Exact balance]\label{cor:exact}
+	If every anchor holds every body, every bank holds exactly $2^K - 1$ nodes.
+\end{corollary}
+
+\begin{proof}
+	Every anchor--body pair occurs once, so $g(hi)$ and $\rho(lo)$ are independent and, by
+	(P4), $g(hi)$ is uniform. Hence $\hat\mu(k) = 0$ for $k \neq 0$, so $\varepsilon_p = 0$
+	and each bank receives $1/B$ of the $B(2^K - 1)$ banked nodes.
+\end{proof}
+
+\paragraph{\underline{Non-bijective rotations}}
+A cache holds only some anchors, so its $g$ need not be one-to-one, and anchors with the
+same rotation place each body in the same bank at the same address.
+
+\begin{theorem}[Non-bijective rotation]\label{thm:cache}
+	Let $g$ map the anchors onto $G$, and let an anchor whose rotation is in use overwrite the
+	one held there. Every resident template is conflict-free, and if every anchor holds every
+	body, then once every rotation is filled, every bank holds exactly $2^K - 1$ nodes.
+\end{theorem}
+
+\begin{proof}
+	Two anchors with the same rotation store each body in the same bank at the same address,
+	so at most one of them is resident, and $g$ is injective on the resident anchors.
+	Theorem~\ref{thm:conflict} does not depend on $g$, so it holds for every resident
+	template. Once every rotation is filled, $g$ is a bijection from the resident anchors onto
+	$G$, and Corollary~\ref{cor:exact} applies to them.
+\end{proof}
+
+\paragraph{\underline{Linear placements}}
+Theorem~\ref{thm:conflict} needs only $B \ge K$ banks while linear placements using XOR schemes in hardware, need exponentially more.
+
+\begin{theorem}[Linear placements]\label{thm:linear}
+	No linear placement $Ax \oplus u$ with fewer than $2^{K-1}$ banks is conflict-free on
+	Fenwick trees.
+\end{theorem}
+
+\begin{proof}
+	Within an anchor only the columns $a_0, \ldots, a_{K-1}$ of $A$ acting on the body matter.
+	A query on a body with set bits $P$ visits $v_j$, the body with its bits below $j$
+	cleared, for each $j \in P$, and for $j < k$ in $P$,
+	$\mathrm{bank}(v_j) \oplus \mathrm{bank}(v_k) = \bigoplus_{i \in P,\, j \le i < k} a_i$.
+	For any nonempty $T \subseteq \{0, \ldots, K - 2\}$, the body with set bits
+	$T \cup \{K - 1\}$, with $j = \min T$ and $k = K - 1$, needs
+	$\bigoplus_{i \in T} a_i \ne 0$. Hence $a_0, \ldots, a_{K-2}$ are linearly independent in
+	$\mathbb{F}_2^{\,b}$, so $b \ge K - 1$ and $B \ge 2^{K-1}$.
+\end{proof}
